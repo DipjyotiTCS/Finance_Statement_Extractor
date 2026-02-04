@@ -15,6 +15,8 @@ class LLMClient:
     def __init__(self):
         self.client=OpenAI(api_key=os.environ.get("OPENAI_API_KEY", "").strip())
         self.openai_model = os.environ.get("OPENAI_MODEL_VISION", "gpt-4o-mini").strip()
+        self.mode = os.environ.get("LLM_MODE", "openai").strip().lower()
+        self._openai_client = self.client
 
 
     pytesseract.pytesseract.tesseract_cmd = (
@@ -115,21 +117,242 @@ class LLMClient:
 
         return json.loads(resp.choices[0].message.content or "{}")
         
+    
     def process_pages(self, job_id, extraction_payload):
+        """
+        New extraction flow:
+        - Run Tesseract OCR on each PNG page to produce an OCR JSON payload (no image sent to LLM).
+        - Send the OCR JSON to LLM to construct the final extracted JSON in the required schema.
+        """
         for ep in extraction_payload:
+            png_path = ep.get("png_path")
+            page_number = int(ep.get("page_number") or 0)
             try:
-                header = self.process_page_header(ep.get("png_path"))
-                print("Header:", header)
-                header_text = str(header.get("header", "")).lower()
+                ocr_payload = self.ocr_page_to_json(str(png_path), page_number=page_number)
 
-                if "notur" in header_text:
-                    self.process_notur_page(job_id, ep.get("page_number"), ep.get("png_path"))
-                else:
-                    self.process_other_pages(job_id, ep.get("page_number"), ep.get("png_path"))
+                extracted = self._openai_extract_from_ocr_json(ocr_payload)
+
+                # Persist extracted JSON back to DB
+                db_path = "data/app.db"
+                conn = get_conn(db_path)
+                try:
+                    e(
+                        conn,
+                        "UPDATE job_pages SET extracted_json = ? WHERE job_id = ? AND page_number = ?",
+                        (json.dumps(extracted, ensure_ascii=False), int(job_id), int(page_number)),
+                    )
+                    conn.commit()
+                finally:
+                    conn.close()
 
             except Exception as ex:
-                print("exception occurred while extracting records from page", ex)
+                print("exception occurred while extracting records from page", page_number, ex)
 
+    
+    def ocr_page_to_json(self, png_path: str, page_number: int) -> Dict[str, Any]:
+        """
+        Run Tesseract OCR and return a compact, LLM-friendly JSON payload.
+
+        The payload includes:
+        - full text
+        - per-word boxes + confidence
+        - per-line aggregation (best-effort)
+        """
+        from PIL import Image as _Image
+        from pytesseract import Output as _Output
+
+        img = _Image.open(png_path)
+        width, height = img.size
+
+        # Language: allow override via env; default to eng.
+        lang = os.environ.get("TESSERACT_LANG", "eng+dan+fao").strip() or "eng"
+
+        config = os.environ.get("TESSERACT_CONFIG", "--oem 1 --psm 6 --dpi 300")
+
+        data = pytesseract.image_to_data(img, output_type=_Output.DICT, lang=lang, config=config)
+
+        words = []
+        # Build word list
+        n = len(data.get("text", []))
+        for i in range(n):
+            txt = (data["text"][i] or "").strip()
+            if not txt:
+                continue
+            try:
+                conf = float(data.get("conf", [])[i])
+            except Exception:
+                conf = -1.0
+
+            x = int(data.get("left", [0])[i] or 0)
+            y = int(data.get("top", [0])[i] or 0)
+            w = int(data.get("width", [0])[i] or 0)
+            h = int(data.get("height", [0])[i] or 0)
+            words.append(
+                {
+                    "text": txt,
+                    "conf": conf,
+                    "bbox": [x, y, x + w, y + h],
+                    "block": int(data.get("block_num", [0])[i] or 0),
+                    "par": int(data.get("par_num", [0])[i] or 0),
+                    "line": int(data.get("line_num", [0])[i] or 0),
+                    "word": int(data.get("word_num", [0])[i] or 0),
+                }
+            )
+
+        # Aggregate into lines (block, par, line)
+        lines_map = {}
+        for w in words:
+            k = (w["block"], w["par"], w["line"])
+            lines_map.setdefault(k, []).append(w)
+
+        lines = []
+        for k, ws in lines_map.items():
+            ws_sorted = sorted(ws, key=lambda t: (t["bbox"][0], t["bbox"][1]))
+            line_text = " ".join([t["text"] for t in ws_sorted]).strip()
+            if not line_text:
+                continue
+            x1 = min(t["bbox"][0] for t in ws_sorted)
+            y1 = min(t["bbox"][1] for t in ws_sorted)
+            x2 = max(t["bbox"][2] for t in ws_sorted)
+            y2 = max(t["bbox"][3] for t in ws_sorted)
+            # average conf excluding -1
+            confs = [t["conf"] for t in ws_sorted if t["conf"] is not None and t["conf"] >= 0]
+            avg_conf = sum(confs) / len(confs) if confs else -1
+
+            lines.append(
+                {
+                    "text": line_text,
+                    "bbox": [x1, y1, x2, y2],
+                    "avg_conf": avg_conf,
+                    "block": k[0],
+                    "par": k[1],
+                    "line": k[2],
+                }
+            )
+
+        # Full text
+        full_text = "\n".join([ln["text"] for ln in sorted(lines, key=lambda t: (t["bbox"][1], t["bbox"][0]))])
+
+        return {
+            "page_number": page_number,
+            "image": {"width": width, "height": height},
+            "text": full_text,
+            "lines": lines,
+            "words": words,
+        }
+
+    def _openai_extract_from_ocr_json(self, ocr_payload: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Use the LLM (text-only) to transform OCR JSON into the required extracted schema.
+
+        Required output schema:
+        {
+          "page_title": "<string>",
+          "years": ["2024","2023"],
+          "rows": {
+            "<row label>": {
+              "Experian Value": "<english translation>",
+              "2024": "<string>",
+              "nota": "<string>",
+              "confidence_score": <0..1>
+            }
+          }
+        }
+        """
+        prompt = (
+            "You are a financial statement table extraction engine.\n"
+            "You are given OCR output from a single PDF page as JSON (from Tesseract).\n\n"
+            "TASK:\n"
+            "1) Identify the best page title/heading (page_title).\n"
+            "2) Extract a table-like set of rows with ONLY FOUR columns considered:\n"
+            "   - Nota (note reference)\n"
+            "   - Line Item (row label)\n"
+            "   - 2024 (value)\n"
+            "   - 2023 (value)\n"
+            "Ignore any other columns/years even if present.\n\n"
+            "OUTPUT JSON MUST EXACTLY MATCH THIS SHAPE (no extra keys):\n"
+            '{\n'
+            '  "page_title": "<string>",\n'
+            '  "years": ["2024","2023"],\n'
+            '  "rows": {\n'
+            '    "<row label>": {\n'
+            '      "Experian Value": "<english translation of row label>",\n'
+            '      "2024": "<string>",\n'
+            '      "2023": "<string>",\n'
+            '      "nota": "<string>",\n'
+            '      "confidence_score": <number between 0 and 1>\n'
+            "    }\n"
+            "  }\n"
+            "}\n\n"
+
+            "Nota Column RULES:\n"
+                "-Pay special attention to the Nota column if its present. Fetch the correct Nota values against each row item. \n"
+                "-Look for Nota column values for each row. If no nota is found for that row keep the json value as blank\n"
+                "-Never use numeric 0 for nota\n"
+
+            "Important General Rules:\n"
+            "- Keep numbers EXACTLY as printed (keep thousand separators, decimal commas/dots).\n"
+            "- If a field is missing, use an empty string for that field (not null).\n"
+            "- confidence_score: estimate 0..1 using OCR confidence and extraction certainty.\n"
+            "- Do not add wrapper keys. Do not include explanations. Return JSON only.\n"
+
+            "COMPLETENESS CHECK (MANDATORY):\n"
+                "Before producing the final JSON:\n"
+                    "-Ensure that all the rows having fiancial numbers under 2024 column has been fetched.\n"
+                    "-Check if Nota values are populated properly for each row items.\n"
+                    "-Cross check if the line items were translated to english and populated under 'Experian Value' field.\n"
+                    "-Ensure the JSON contains AT LEAST the same number of row entries.\n"
+                    "-If not, retry internally and add the missing rows.\n"
+        )
+
+        # Keep OCR payload compact to avoid token blowups (words can be huge).
+        compact = {
+            "page_number": ocr_payload.get("page_number"),
+            "image": ocr_payload.get("image"),
+            "text": ocr_payload.get("text", ""),
+            "lines": ocr_payload.get("lines", [])[:400],  # cap
+        }
+
+        resp = self.client.chat.completions.create(
+            model=os.environ.get("OPENAI_MODEL_TEXT", os.environ.get("OPENAI_MODEL", "gpt-4o-mini")).strip(),
+            messages=[
+                {"role": "user", "content": prompt + "\n\nOCR_JSON:\n" + json.dumps(compact, ensure_ascii=False)}
+            ],
+            response_format={"type": "json_object"},
+        )
+
+        out = json.loads(resp.choices[0].message.content or "{}")
+
+        # Post-normalize to enforce required keys and formats
+        if "years" not in out or not isinstance(out.get("years"), list):
+            out["years"] = ["2024", "2023"]
+        if out.get("years") != ["2024", "2023"]:
+            out["years"] = ["2024", "2023"]
+
+        out.setdefault("page_title", "")
+        out.setdefault("rows", {})
+        if not isinstance(out.get("rows"), dict):
+            out["rows"] = {}
+
+        # Ensure each row has the required keys
+        for k, v in list(out["rows"].items()):
+            if not isinstance(v, dict):
+                out["rows"][k] = {"Experian Value": "", "2024": "", "nota": "", "confidence_score": 0.0}
+                continue
+            v.setdefault("Experian Value", "")
+            v.setdefault("2024", "")
+            v.setdefault("nota", "")
+            cs = v.get("confidence_score", 0.0)
+            try:
+                csf = float(cs)
+            except Exception:
+                csf = 0.0
+            if csf < 0: csf = 0.0
+            if csf > 1: csf = 1.0
+            v["confidence_score"] = csf
+            out["rows"][k] = v
+
+        return out
 
     def process_page_header(self, png_path):
         
@@ -346,10 +569,9 @@ class LLMClient:
                     If a value is missing, use an empty string ""
 
                     NOTA RULES:
-
-                    If no nota is present, use ""
-
-                    Never use numeric 0 for nota
+                        -Pay special attention to the Nota column if its present. Fetch the correct Nota values against each row item.
+                        -If no nota is present, use ""
+                        -Never use numeric 0 for nota
 
                     OUTPUT FORMAT (JSON ONLY):
                     {
@@ -367,13 +589,11 @@ class LLMClient:
                     }
 
                     COMPLETENESS CHECK (MANDATORY):
-                    Before producing the final JSON:
-
-                    Count the number of visible table rows in the image.
-
-                    Ensure the JSON contains AT LEAST the same number of row entries.
-
-                    If not, retry internally and add the missing rows.
+                        Before producing the final JSON:
+                            -Count the number of visible table rows in the image.
+                            -Check if Nota values are populated properly for each row items
+                            -Ensure the JSON contains AT LEAST the same number of row entries.
+                            -If not, retry internally and add the missing rows.
 
                     Return ONLY valid JSON.
                     """
