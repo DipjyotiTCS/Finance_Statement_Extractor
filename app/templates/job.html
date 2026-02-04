@@ -1,0 +1,1203 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<style>
+  /* Header spacing */
+  .viewer-shell { height: calc(100vh - 90px); position: relative; }
+
+  /* Flex shell so collapsing left truly frees space */
+  .viewer-flex { display: flex; gap: 16px; height: 1100px; }
+  .thumb-col { width: 280px; flex: 0 0 280px; transition: width .22s ease; }
+  .thumb-col.collapsed { width: 0; flex: 0 0 0; }
+  .thumb-col.collapsed * { display: none !important; }
+
+  /* Re-open tab shown only when thumbnails are collapsed */
+  .thumb-reopen {
+    display: none;
+    position: absolute;
+    left: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    z-index: 50;
+    border: 1px solid rgba(0,0,0,.12);
+    border-left: 0;
+    border-top-right-radius: 12px;
+    border-bottom-right-radius: 12px;
+    padding: 10px 10px;
+    background: #0b4f67;
+    color: #fff;
+    box-shadow: 0 8px 24px rgba(0,0,0,.18);
+    cursor: pointer;
+  }
+  .thumb-reopen:hover { filter: brightness(1.06); }
+  .thumb-reopen:active { filter: brightness(0.98); }
+
+  /* Give the expand tab a bit of spacing from the edge on small screens */
+  @media (max-width: 992px) {
+    .thumb-reopen { left: 0; }
+  }
+
+  .content-col { flex: 1 1 auto; min-width: 0; display: flex; gap: 16px; height: 100%; }
+
+  /* Single shared vertical scrollbar for Original + Extracted */
+  .content-col { overflow: hidden; }
+  .content-scroll { flex: 1 1 auto; display: flex; gap: 16px; height: 100%; overflow-y: auto; overflow-x: hidden; padding-right: 2px; }
+
+  /* Within the shared scroll area, panels should size by content (not fixed height) */
+  .content-scroll .panel { height: auto; }
+
+
+  /* Panels */
+  .panel { background: #f3f5f7; border: 1px solid #e5e7eb; border-radius: 16px; overflow: hidden; }
+  .panel-head { padding: 12px 14px; border-bottom: 1px solid #e5e7eb; display: flex; align-items: center; justify-content: space-between; }
+
+  /* Left thumbs panel */
+  .thumbs { background: #0b4f67; border-color: rgba(255,255,255,.15);   height: 100%;
+}
+  .thumbs .panel-head { border-bottom: 1px solid rgba(255,255,255,.25); }
+  .thumbs .thumb-item { cursor: pointer; }
+  .thumbs .thumb-item.active { outline: 3px solid rgba(255,255,255,.85); border-radius: 10px; }
+  .thumbs .thumb-img { width: 100%; border: 2px solid rgba(255,255,255,.35); border-radius: 8px; background: #fff; }
+  .thumbs .thumb-label { color: rgba(255,255,255,.92); font-size: .85rem; }
+
+  /* Make left section independently scrollable */
+  .thumb-scroll { padding: 12px; height: calc(100% - 54px); overflow-y: auto; overflow-x: hidden; }
+
+  /* Panel bodies inside shared scroll */
+  .panel-body-shared { padding: 6px; overflow: visible; }
+  .panel-body-extracted { padding: 14px; overflow-x: auto; overflow-y: visible;   max-width: 100%;
+}
+
+  /* Column sizing */
+  .panel.original-panel { flex: 0 0 60%; min-width: 0; }
+  .panel.extracted-panel { flex: 0 0 40%; min-width: 0; }
+
+  /* Extracted panel: keep table width; horizontal scroll lives in the extracted body; vertical scroll is shared */
+  .extracted-panel .panel-body-extracted { overflow-x: auto; }
+  .json-table { min-width: 1040px; border-collapse: collapse; }
+  .json-table th, .json-table td { border: 1px solid #d1d5db !important; }
+
+  /* Image panel */
+  .img-wrap { width: 100%; display: flex; align-items: center; justify-content: center; }
+  .page-img { width: 100%; height: auto; max-width: 100%; border-radius: 12px; border: 1px solid #e5e7eb; background: #fff; object-fit: contain; display: block; }
+
+  /* JSON panel */
+
+  /* JSON panel should be scrollable (table area) */
+  .panel-body-scroll { padding: 14px; height: calc(100% - 54px); overflow-y: auto; overflow-x: hidden; }
+
+  .json-box { width: 100%; border-radius: 12px; border: 1px solid #e5e7eb; background: #fff; padding: 10px;   max-width: 100%;
+}
+
+  .json-table { width: 100%; margin: 0; }
+  .json-table th { position: sticky; top: 0; background: #f8fafc; z-index: 2; }
+  .json-table td, .json-table th { vertical-align: middle; }
+  .json-table tbody tr:hover { background: #fff7ed; }
+
+  .old-value { color: #b91c1c; text-decoration: line-through; margin-right: 8px; }
+  .new-value { color: #166534; font-weight: 600; }
+
+  /* Highlight overlay on the page image */
+  .img-wrap { position: relative; }
+  #page-highlight {
+    position: absolute;
+    left: 0;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    pointer-events: none;
+    display: none;
+  }
+
+  .hl-box {
+    position: absolute;
+    border: 3px solid #fb923c;
+    background: rgba(251, 146, 60, 0.30);
+    border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(0,0,0,.18);
+  }
+
+  .muted-note { color: #6b7280; }
+
+  @media (max-width: 992px) {
+    .viewer-shell { height: auto; }
+    .viewer-flex { flex-direction: column; height: auto; }
+    .thumb-col, .thumb-col.collapsed { width: 100%; flex: 0 0 auto; }
+    .content-col { flex-direction: column; height: auto; }
+    .panel { height: auto; }
+    .panel-body-fixed { height: auto; }
+    .thumb-scroll { height: auto; }
+    .page-img { max-height: none; }
+    .json-box pre { height: auto; }
+  }
+</style>
+
+<div class="d-flex align-items-center justify-content-between mb-2">
+  <div class="d-flex align-items-center gap-2">
+    <a class="btn btn-sm btn-outline-secondary" href="{{ url_for('main.index') }}">&larr; Back</a>
+    <div>
+      <div class="fw-semibold">Job #{{ job["id"] }} — <span class="mono">{{ job["pdf_filename"] }}</span></div>
+      <div class="text-muted small">Processed On: {{ job["created_at"] }}</div>
+    </div>
+  </div>
+  <div>
+    {% if job["status"] == "Complete" %}
+      <span class="badge bg-success fs-6">{{ job["status"] }}</span>
+    {% elif job["status"] == "Failed" %}
+      <span class="badge bg-danger fs-6">{{ job["status"] }}</span>
+    {% else %}
+      <span class="badge bg-warning text-dark fs-6">{{ job["status"] }}</span>
+    {% endif %}
+  </div>
+</div>
+
+{% if job["error"] %}
+  <div class="alert alert-danger"><b>Error:</b> {{ job["error"] }}</div>
+{% endif %}
+
+<!-- Header metadata table (hardcoded fields + derived metadata) -->
+<div class="table-responsive mb-3">
+  <table class="table table-sm table-bordered align-middle">
+    <thead class="table-light"><tr>
+      <th>KOB no</th>
+      <th>PDF_IDnumber</th>
+      <th>Account_type</th>
+      <th>Publication_date</th>
+      <th>Period_start</th>
+      <th>Period_end</th>
+      <th>Account_class</th>
+      <th>Currency_code</th>
+    </tr></thead>
+    <tbody><tr>
+      <td>{{ kob_no|default("KOB-0001") }}</td>
+      <td>{{ pdf_idnumber|default("") }}</td>
+      <td>NOR</td>
+      <td>{{ publication_date|default("") }}</td>
+      <td>{{ period_start|default("") }}</td>
+      <td>{{ period_end|default("") }}</td>
+      <td>B</td>
+      <td>DKK</td>
+    </tr></tbody>
+  </table>
+</div>
+
+<div class="viewer-shell">
+  <!-- Visible only when the left panel is collapsed -->
+  <button id="reopenThumbs" class="thumb-reopen" type="button" aria-label="Show pages">
+    &#9776; Pages
+  </button>
+
+  <div class="viewer-flex">
+
+    <!-- Left: thumbnails (collapsible) -->
+    <div class="thumb-col" id="thumbCol">
+      <div class="panel thumbs" id="thumbPanel">
+        <div class="panel-head">
+          <div class="text-white fw-semibold">Pages</div>
+          <button class="btn btn-sm btn-outline-light" type="button" id="toggleThumbs" aria-label="Toggle thumbnails">
+            Collapse
+          </button>
+        </div>
+        <div class="thumb-scroll">
+          <div class="d-flex flex-column gap-3" id="thumbContainer">
+            {% for p in pages %}
+              <div class="thumb-item" data-page="{{ p['page_number'] }}">
+                <img class="thumb-img" alt="Page {{ p['page_number'] }}" src="{{ url_for('main.job_page_png', job_id=job['id'], page_number=p['page_number']) }}"/>
+                <div class="thumb-label mt-1">Page {{ p['page_number'] }}</div>
+              </div>
+            {% endfor %}
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Right: side-by-side viewer (no scrollbars) -->
+    <div class="content-col" id="contentCol">
+      <div class="content-scroll" id="contentScroll">
+
+      <!-- Original page -->
+      <div class="panel original-panel">
+        <div class="panel-head">
+          <div class="fw-semibold">Original Page</div>
+          <div class="text-muted small">Page <span id="pageNumA">-</span></div>
+        </div>
+        <div class="panel-body-shared">
+          <div class="img-wrap">
+            <img id="pageImage" class="page-img" alt="Selected page" />
+            <div id="page-highlight"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Extracted JSON -->
+      <div class="panel extracted-panel">
+        <div class="panel-head">
+          <div class="fw-semibold">Extracted JSON</div>
+          <div class="text-muted small">Page <span id="pageNumB">-</span></div>
+        </div>
+        
+  <div class="panel-body-shared panel-body-extracted">
+    <div class="json-box">
+      <div id="jsonTitle" class="fw-semibold mb-2" style="display:none;"></div>
+      <div id="jsonEmpty" class="muted-note" style="display:none;">&nbsp;</div>
+
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div class="small text-muted">Title: <span id="pageTitle" class="fw-semibold">-</span></div>
+      </div>
+
+      <div class="table-responsive" style="border-radius: 12px; overflow-x: auto; overflow-y: hidden;">
+        <table class="table table-sm table-hover align-middle table-bordered json-table">
+          <thead id="jsonThead"></thead>
+          <tbody id="jsonTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<script>
+  const JOB_ID = {{ job['id'] }};
+  const PAGES = {{ pages | map(attribute='page_number') | list | tojson }};
+
+  function isEmptyExtracted(extracted) {
+    if (extracted === null || extracted === undefined) return true;
+    if (typeof extracted === 'string') {
+      const s = extracted.trim();
+      if (!s) return true;
+      if (s === 'null' || s === 'None') return true;
+      if (s === '{}' || s === '[]') return true;
+      return false;
+    }
+    if (typeof extracted === 'object') {
+      if (Array.isArray(extracted)) return extracted.length === 0;
+      return Object.keys(extracted).length === 0;
+    }
+    return false;
+  }
+
+  
+  const highlightEl = document.getElementById('page-highlight');
+  let LAST_HL_BBOXES = null;
+  let OCR_CACHE = { pageNumber: null, words: [], image: null, lang: null };
+
+  function safeParseExtracted(extracted) {
+    if (extracted === null || extracted === undefined) return null;
+    if (typeof extracted === 'string') {
+      const raw = extracted.trim();
+      if (!raw) return "";
+      try { return JSON.parse(raw); } catch (_) { return extracted; }
+    }
+    return extracted;
+  }
+
+  function inferType(v) {
+    if (v === null || v === undefined) return "";
+    if (Array.isArray(v)) return "array";
+    return typeof v;
+  }
+
+  
+function getDocumentLang(extractedObj) {
+  // Priority: OCR detected language > extracted JSON > heuristic > fallback
+  try {
+    if (window.OCR_CACHE && OCR_CACHE && OCR_CACHE.lang) return OCR_CACHE.lang;
+  } catch (_) {}
+
+  if (extractedObj && extractedObj.language) return extractedObj.language;
+  if (extractedObj && extractedObj.lang) return extractedObj.lang;
+
+  // Heuristic: infer from page title / a few row labels
+  let sample = "";
+  try {
+    const t = (extractedObj && extractedObj.page_title) ? extractedObj.page_title : "";
+    const keys = (extractedObj && extractedObj.rows) ? Object.keys(extractedObj.rows).slice(0, 10).join(" ") : "";
+    sample = (t + " " + keys).trim();
+  } catch (_) { sample = ""; }
+
+  const s = (sample || "").toLowerCase();
+
+  // Faroese: common characters/terms
+  if (/[ð]/.test(s) || /fíggjar|rakstrar|\bogn\b|skyldur/.test(s)) return "fo";
+  // Danish hints
+  if (/\baktiver\b|\bpassiver\b|\begenkapital\b|\bgæld\b/.test(s)) return "da";
+  // Icelandic hints
+  if (/[þ]/.test(s) && /[ð]/.test(s)) return "is";
+
+  return "xx";
+}
+
+function isFinancialShape(extractedObj) {
+    return extractedObj && typeof extractedObj === 'object' && !Array.isArray(extractedObj)
+      && extractedObj.rows && typeof extractedObj.rows === 'object' && !Array.isArray(extractedObj.rows);
+  }
+
+  function extractYearColumns(rowsObj) {
+    const years = new Set();
+    for (const v of Object.values(rowsObj || {})) {
+      if (!v || typeof v !== 'object') continue;
+      for (const k of Object.keys(v)) {
+        if (/^\d{4}$/.test(k)) years.add(k);
+      }
+    }
+    // Prefer descending so latest year appears first
+    return Array.from(years).sort((a, b) => Number(b) - Number(a));
+  }
+
+  function normalizeToKVRows(extractedObj) {
+    // Fallback shapes:
+    // 1) { "Item": {value, item_type, confidence_score, bbox?, _original? } , ... }
+    // 2) { "Item": primitive, ... }
+    // 3) [ {item, value, item_type, confidence_score, bbox?}, ... ]
+    const rows = [];
+    if (Array.isArray(extractedObj)) {
+      for (const it of extractedObj) {
+        if (!it) continue;
+        rows.push({
+          item: it.item ?? it.key ?? "",
+          value: it.value ?? "",
+          item_type: it.item_type ?? it.type ?? "",
+          confidence_score: it.confidence_score ?? it.confidence ?? "",
+          bbox: it.bbox ?? null,
+          original_value: it.original_value ?? it._original ?? null,
+        });
+      }
+      return rows.filter(r => r.item);
+    }
+    if (typeof extractedObj !== 'object' || extractedObj === null) return rows;
+    for (const [k, v] of Object.entries(extractedObj)) {
+      if (v && typeof v === 'object' && !Array.isArray(v)) {
+        rows.push({
+          item: k,
+          value: v.value ?? "",
+          item_type: v.item_type ?? v.type ?? "",
+          confidence_score: v.confidence_score ?? v.confidence ?? "",
+          bbox: v.bbox ?? null,
+          original_value: v._original ?? v.original_value ?? null,
+        });
+      } else {
+        rows.push({
+          item: k,
+          value: v,
+          item_type: inferType(v),
+          confidence_score: "",
+          bbox: null,
+          original_value: null,
+        });
+      }
+    }
+    return rows;
+  }
+
+  function clearHighlight() {
+    highlightEl.innerHTML = '';
+    highlightEl.style.display = 'none';
+    LAST_HL_BBOXES = null;
+  }
+
+  function _imgToOverlayTransform() {
+    const img = document.getElementById('pageImage');
+    if (!img || !img.complete) return null;
+
+    const natW = img.naturalWidth || 1;
+    const natH = img.naturalHeight || 1;
+
+    const rect = img.getBoundingClientRect();
+    const wrapRect = img.parentElement.getBoundingClientRect();
+
+    const dispW = rect.width;
+    const dispH = rect.height;
+    const offsetLeft = rect.left - wrapRect.left;
+    const offsetTop = rect.top - wrapRect.top;
+
+    return {
+      natW, natH,
+      dispW, dispH,
+      offsetLeft, offsetTop,
+      scaleX: dispW / natW,
+      scaleY: dispH / natH,
+    };
+  }
+
+  function showHighlightsFromBBoxes(bboxes) {
+    if (!bboxes || !bboxes.length) { clearHighlight(); return; }
+    const t = _imgToOverlayTransform();
+    if (!t) { clearHighlight(); return; }
+
+    // Remember last highlight so we can re-render on resize/collapse.
+    LAST_HL_BBOXES = bboxes;
+
+    // OCR / extracted bboxes are sometimes generated against a different render size
+    // than the currently displayed PNG. If OCR provides source image dimensions,
+    // remap bbox coordinates from (sourceW, sourceH) -> (naturalW, naturalH) first.
+    const srcW = (OCR_CACHE && OCR_CACHE.image && OCR_CACHE.image.width) ? OCR_CACHE.image.width : t.natW;
+    const srcH = (OCR_CACHE && OCR_CACHE.image && OCR_CACHE.image.height) ? OCR_CACHE.image.height : t.natH;
+    const remapToNatural = (bbox) => {
+      const sx = t.natW / (srcW || 1);
+      const sy = t.natH / (srcH || 1);
+      return {
+        x: (bbox.x || 0) * sx,
+        y: (bbox.y || 0) * sy,
+        width: (bbox.width || 0) * sx,
+        height: (bbox.height || 0) * sy
+      };
+    };
+
+    // Expand each bbox a bit so the overlay covers more around letters/words.
+    const expandBox = (bboxNat) => {
+      const padX = Math.max(4, (bboxNat.width || 0) * 0.18);
+      const padY = Math.max(3, (bboxNat.height || 0) * 0.32);
+      const x = Math.max(0, (bboxNat.x || 0) - padX);
+      const y = Math.max(0, (bboxNat.y || 0) - padY);
+      const w = Math.min(t.natW - x, (bboxNat.width || 0) + (padX * 2));
+      const h = Math.min(t.natH - y, (bboxNat.height || 0) + (padY * 2));
+      return { x, y, width: w, height: h };
+    };
+
+    highlightEl.innerHTML = '';
+    for (const bbox of bboxes) {
+      if (!bbox) continue;
+      const natBox = remapToNatural(bbox);
+      const b = expandBox(natBox);
+
+      const x = t.offsetLeft + (b.x * t.scaleX);
+      const y = t.offsetTop + (b.y * t.scaleY);
+      const w = (b.width * t.scaleX);
+      const h = (b.height * t.scaleY);
+
+      const box = document.createElement('div');
+      box.className = 'hl-box';
+      box.style.left = `${x}px`;
+      box.style.top = `${y}px`;
+      box.style.width = `${w}px`;
+      box.style.height = `${h}px`;
+      highlightEl.appendChild(box);
+    }
+    highlightEl.style.display = 'block';
+  }
+
+
+  function rerenderHighlightIfNeeded() {
+    if (LAST_HL_BBOXES && highlightEl.style.display === 'block') {
+      showHighlightsFromBBoxes(LAST_HL_BBOXES);
+    }
+  }
+
+  window.addEventListener('resize', () => {
+    // Image can re-layout on resize; re-project boxes.
+    rerenderHighlightIfNeeded();
+  });
+
+  function showHighlightFromBBox(bbox) {
+    // Backward compatibility with existing bbox-per-row behavior.
+    if (!bbox) { clearHighlight(); return; }
+    showHighlightsFromBBoxes([bbox]);
+  }
+
+  async function loadOcr(pageNumber) {
+    try {
+      const res = await fetch(`/job/${JOB_ID}/page/${pageNumber}/ocr`);
+      const data = await res.json();
+      OCR_CACHE = { pageNumber, words: data.words || [], image: data.image || null, lang: data.lang || data.language || null };
+    } catch (e) {
+      OCR_CACHE = { pageNumber, words: [], image: null, lang: null };
+    }
+  }
+
+  // --- Word-level highlighting helpers (phrase -> boxes)
+  // Goal:
+  // 1) Hover row -> highlight the row label phrase on the PNG
+  // 2) Highlight all occurrences on the current page
+  // 3) If label phrase not found -> fallback to highlighting matching individual words
+
+  function _stripDiacritics(s) {
+    try {
+      return String(s).normalize('NFKD').replace(/[\u0300-\u036f]/g, '');
+    } catch (_) {
+      return String(s);
+    }
+  }
+
+  function normalizeTextKeepSpaces(s) {
+    if (s === null || s === undefined) return '';
+    const raw = _stripDiacritics(String(s)).toLowerCase();
+    try {
+      return raw
+        .replace(/[^\p{L}\p{N}\s]+/gu, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    } catch (_) {
+      // Fallback if \p{} isn't supported
+      return raw
+        .replace(/[^a-z0-9\s]+/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+  }
+
+  function tokenizePhrase(s) {
+    const n = normalizeTextKeepSpaces(s);
+    return n ? n.split(' ').filter(Boolean) : [];
+  }
+
+  function unionBox(boxes) {
+    const x1 = Math.min(...boxes.map(b => b.x));
+    const y1 = Math.min(...boxes.map(b => b.y));
+    const x2 = Math.max(...boxes.map(b => b.x + b.width));
+    const y2 = Math.max(...boxes.map(b => b.y + b.height));
+    return { x: x1, y: y1, width: (x2 - x1), height: (y2 - y1) };
+  }
+
+  function findPhraseBBoxes(phrase) {
+    const words = (OCR_CACHE.words || []).filter(w => (w && w.text));
+    if (!phrase || !words.length) return [];
+
+    const tokens = tokenizePhrase(phrase);
+    if (!tokens.length) return [];
+
+    const ocrTokens = words.map(w => tokenizePhrase(w.text || '')[0] || '').filter((_, idx) => true);
+
+    // Find ALL contiguous phrase matches
+    const matches = [];
+    for (let i = 0; i <= ocrTokens.length - tokens.length; i++) {
+      let ok = true;
+      for (let j = 0; j < tokens.length; j++) {
+        if (ocrTokens[i + j] !== tokens[j]) { ok = false; break; }
+      }
+      if (ok) {
+        const slice = words.slice(i, i + tokens.length).map(w => ({
+          x: w.x,
+          y: w.y,
+          width: w.width,
+          height: w.height,
+        }));
+        matches.push(unionBox(slice));
+      }
+    }
+
+    if (matches.length) return matches;
+
+    // Fallback: highlight matching individual words (ALL occurrences)
+    const tokenSet = new Set(tokens);
+    const fallback = [];
+    for (let i = 0; i < words.length; i++) {
+      const t = ocrTokens[i];
+      if (t && tokenSet.has(t)) {
+        const w = words[i];
+        fallback.push({ x: w.x, y: w.y, width: w.width, height: w.height });
+      }
+    }
+    return fallback;
+  }
+
+  // --- Row-level highlight helpers (highlight full row including numbers) ---
+
+  function _normalizeOcrText(s) {
+    return (s || "")
+      .toLowerCase()
+      .replace(/\s+/g, " ")
+      .replace(/[:;,]+$/g, "")       // drop trailing punctuation like ':'
+      .replace(/[\u00A0]/g, " ")    // nbsp
+      .trim();
+  }
+
+  function _groupWordsIntoLines(words) {
+    // Group by y-center proximity; return array of {bbox, text, cy}
+    const ws = (words || []).filter(w => w && w.text);
+    if (!ws.length) return [];
+    const sorted = ws.slice().sort((a,b) => (((a.y||0)+(a.height||0)/2) - ((b.y||0)+(b.height||0)/2)) || ((a.x||0)-(b.x||0)));
+    const lines = [];
+    const yTolBase = 10;
+
+    for (const w of sorted) {
+      const cy = (w.y || 0) + ((w.height || 0) / 2);
+      let best = null;
+      for (const ln of lines) {
+        const tol = Math.max(yTolBase, (ln.avgH || 10) * 0.9);
+        if (Math.abs(cy - ln.cy) <= tol) { best = ln; break; }
+      }
+      if (!best) {
+        best = { words: [], cy, avgH: (w.height||10) };
+        lines.push(best);
+      }
+      best.words.push(w);
+      best.cy = (best.cy * (best.words.length-1) + cy) / best.words.length;
+      best.avgH = (best.avgH * (best.words.length-1) + (w.height||best.avgH)) / best.words.length;
+    }
+
+    const out = [];
+    for (const ln of lines) {
+      const wsorted = ln.words.slice().sort((a,b) => (a.x||0)-(b.x||0));
+      const boxes = wsorted.map(w => ({x:w.x, y:w.y, width:w.width, height:w.height}));
+      const bbox = unionBox(boxes);
+      const text = wsorted.map(w => (w.text||"").trim()).filter(Boolean).join(" ");
+      out.push({ bbox, text, cy: ln.cy });
+    }
+    return out;
+  }
+
+  function findItemLineBBoxByText(label) {
+    // Match the entire Items-cell text as a line (not individual words).
+    const words = (OCR_CACHE.words || []).filter(w => w && w.text);
+    if (!label || !words.length) return null;
+
+    const target = _normalizeOcrText(label);
+    if (!target) return null;
+
+    const lines = _groupWordsIntoLines(words);
+    let best = null;
+
+    for (const ln of lines) {
+      const lnNorm = _normalizeOcrText(ln.text);
+      if (!lnNorm) continue;
+
+      let score = 0;
+      if (lnNorm === target) score = 1000;
+      else if (lnNorm.includes(target)) score = 500 + Math.min(200, target.length);
+      else {
+        const tset = new Set(target.split(" "));
+        const lset = new Set(lnNorm.split(" "));
+        let inter = 0;
+        for (const t of tset) if (lset.has(t)) inter++;
+        score = inter;
+      }
+
+      if (!best || score > best.score || (score === best.score && (ln.bbox.y||0) < (best.bbox.y||0))) {
+        best = { score, bbox: ln.bbox };
+      }
+    }
+
+    if (!best) return null;
+    if (best.score < 2 && target.split(" ").length > 1) return null;
+    if (best.score < 1) return null;
+
+    return best.bbox;
+  }
+
+  function _rowBBoxFromSeedBBox(seedBBox) {
+    const words = (OCR_CACHE.words || []).filter(w => (w && w.text));
+    if (!seedBBox || !words.length) return null;
+
+    const cy = (seedBBox.y || 0) + ((seedBBox.height || 0) / 2);
+    const h = Math.max(8, (seedBBox.height || 0));
+    const tol = Math.max(10, h * 0.95); // generous tolerance to catch numbers in same row
+
+    const y1 = cy - tol;
+    const y2 = cy + tol;
+
+    const rowWords = [];
+    for (const w of words) {
+      const wcy = (w.y || 0) + ((w.height || 0) / 2);
+      if (wcy >= y1 && wcy <= y2) {
+        rowWords.push({ x: w.x, y: w.y, width: w.width, height: w.height });
+      }
+    }
+    if (!rowWords.length) return null;
+    return unionBox(rowWords);
+  }
+
+  function findRowBBoxByLabel(label) {
+    // Try to match the entire Items-cell text as a line first (more stable than word-by-word).
+    const lineBBox = findItemLineBBoxByText(label);
+    if (lineBBox) {
+      const rowBox = _rowBBoxFromSeedBBox(lineBBox);
+      return rowBox || lineBBox;
+    }
+
+    // Fallback: phrase match
+    const phraseBoxes = findPhraseBBoxes(label);
+    if (!phraseBoxes || !phraseBoxes.length) return null;
+
+    // If the label appears multiple times, pick the top-most match.
+    const seed = phraseBoxes.slice().sort((a,b) => (a.y||0) - (b.y||0))[0];
+    return _rowBBoxFromSeedBBox(seed) || seed;
+  }
+
+  function setTableHeader(html) {
+    document.getElementById('jsonThead').innerHTML = html;
+  }
+
+  function setJsonTitle(title) {
+    const el = document.getElementById('jsonTitle');
+    if (title) {
+      el.textContent = title;
+      el.style.display = 'block';
+    } else {
+      el.textContent = '';
+      el.style.display = 'none';
+    }
+  }
+
+  function renderFinancialTable(pageNumber, extractedObj) {
+    const tbody = document.getElementById('jsonTbody');
+    const jsonEmpty = document.getElementById('jsonEmpty');
+
+    const rowsObj = extractedObj.rows || {};
+    const years = extractYearColumns(rowsObj);
+    const pageTitle = extractedObj.page_title || '';
+    setJsonTitle(pageTitle);
+
+    // Header: Item + dynamic years + Note + Confidence + Action
+    const yearThs = years.map(y => `<th>${y}</th>`).join('');
+    setTableHeader(
+  (() => {
+    const lang = getDocumentLang(extractedObj);
+    return `<tr>
+      <th style="min-width:220px;">Items (${lang})</th>
+      <th style="min-width:220px;">Items (en)</th>
+      ${yearThs}
+      <th>Note</th>
+      <th style="width:140px;">Confidence</th>
+      <th style="width:110px;">Action</th>
+    </tr>`;
+  })()
+);
+tbody.innerHTML = '';
+    const keys = Object.keys(rowsObj);
+    jsonEmpty.style.display = keys.length ? 'none' : 'block';
+
+    keys.forEach((itemName) => {
+      const rowObj = rowsObj[itemName] || {};
+      const tr = document.createElement('tr');
+      tr.className = 'json-row';
+      tr.dataset.item = itemName;
+      tr.dataset.page = String(pageNumber);
+      tr.dataset.bbox = rowObj.bbox ? JSON.stringify(rowObj.bbox) : '';
+
+      tr.addEventListener('mouseenter', () => {
+        if (tr.dataset.bbox) {
+          try {
+            const seed = JSON.parse(tr.dataset.bbox);
+            const rowBox = _rowBBoxFromSeedBBox(seed);
+            showHighlightFromBBox(rowBox || seed);
+          } catch (_) { clearHighlight(); }
+        } else {
+          // Fallback: highlight full ROW (label + numbers across columns) using OCR boxes.
+          const rowBox = findRowBBoxByLabel(itemName);
+          if (rowBox) showHighlightFromBBox(rowBox); else clearHighlight();
+        }
+      });
+      tr.addEventListener('mouseleave', () => clearHighlight());
+
+      // Item cell
+      const tdItem = document.createElement('td');
+      tdItem.textContent = itemName;
+      tr.appendChild(tdItem);
+
+
+// Experian Value cell
+const tdExp = document.createElement('td');
+tdExp.textContent = rowObj["Experian Value"] ?? rowObj["experian_value"] ?? "";
+tr.appendChild(tdExp);
+
+      // Year cells
+      const originalMap = (rowObj && typeof rowObj._original === 'object' && rowObj._original !== null) ? rowObj._original : {};
+      const yearTds = {};
+      years.forEach((y) => {
+        const td = document.createElement('td');
+        td.dataset.kind = `year:${y}`;
+        const curVal = rowObj[y];
+        const oldVal = originalMap ? originalMap[y] : undefined;
+        const isDiff = oldVal !== undefined && String(oldVal) !== String(curVal);
+        if (isDiff) {
+          const del = document.createElement('del');
+          del.className = 'old-value';
+          del.textContent = String(oldVal);
+          const span = document.createElement('span');
+          span.className = 'new-value';
+          span.textContent = (curVal === null || curVal === undefined) ? '' : String(curVal);
+          td.appendChild(del);
+          td.appendChild(span);
+        } else {
+          td.textContent = (curVal === null || curVal === undefined) ? '' : String(curVal);
+        }
+        yearTds[y] = td;
+        tr.appendChild(td);
+      });
+
+      // Note cell
+      const tdNote = document.createElement('td');
+      tdNote.dataset.kind = 'nota';
+      const curNote = rowObj.nota ?? '';
+      const oldNote = originalMap ? originalMap.nota : undefined;
+      const noteDiff = oldNote !== undefined && String(oldNote) !== String(curNote);
+      if (noteDiff) {
+        const del = document.createElement('del');
+        del.className = 'old-value';
+        del.textContent = String(oldNote);
+        const span = document.createElement('span');
+        span.className = 'new-value';
+        span.textContent = String(curNote);
+        tdNote.appendChild(del);
+        tdNote.appendChild(span);
+      } else {
+        tdNote.textContent = String(curNote);
+      }
+      tr.appendChild(tdNote);
+
+      // Confidence
+      const tdConf = document.createElement('td');
+      tdConf.dataset.kind = 'confidence_score';
+      const curConf = rowObj.confidence_score ?? '';
+      const oldConf = originalMap ? originalMap.confidence_score : undefined;
+      const confDiff = oldConf !== undefined && String(oldConf) !== String(curConf);
+      if (confDiff) {
+        const del = document.createElement('del');
+        del.className = 'old-value';
+        del.textContent = String(oldConf);
+        const span = document.createElement('span');
+        span.className = 'new-value';
+        span.textContent = String(curConf);
+        tdConf.appendChild(del);
+        tdConf.appendChild(span);
+      } else {
+        tdConf.textContent = (curConf === null || curConf === undefined) ? '' : String(curConf);
+      }
+      tr.appendChild(tdConf);
+
+      // Action
+      const tdAct = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-outline-primary';
+      btn.textContent = 'Edit';
+      btn.type = 'button';
+
+      btn.addEventListener('click', async () => {
+        const editing = tr.dataset.editing === '1';
+        if (!editing) {
+          tr.dataset.editing = '1';
+          btn.textContent = 'Submit';
+          btn.classList.remove('btn-outline-primary');
+          btn.classList.add('btn-primary');
+
+          // Create inputs for years + note + confidence
+          tr._yearInputs = {};
+          years.forEach((y) => {
+            const inp = document.createElement('input');
+            inp.className = 'form-control form-control-sm';
+            inp.value = (rowObj[y] === null || rowObj[y] === undefined) ? '' : String(rowObj[y]);
+            yearTds[y].innerHTML = '';
+            yearTds[y].appendChild(inp);
+            tr._yearInputs[y] = inp;
+          });
+
+          const noteInp = document.createElement('input');
+          noteInp.className = 'form-control form-control-sm';
+          noteInp.value = (rowObj.nota ?? '');
+          tdNote.innerHTML = '';
+          tdNote.appendChild(noteInp);
+          tr._noteInput = noteInp;
+
+          const confInp = document.createElement('input');
+          confInp.className = 'form-control form-control-sm';
+          confInp.value = (rowObj.confidence_score === null || rowObj.confidence_score === undefined) ? '' : String(rowObj.confidence_score);
+          confInp.placeholder = '0.0 - 1.0';
+          tdConf.innerHTML = '';
+          tdConf.appendChild(confInp);
+          tr._confInput = confInp;
+        } else {
+          btn.disabled = true;
+          const updates = { years: {}, nota: tr._noteInput ? tr._noteInput.value : '', confidence_score: '' };
+          years.forEach((y) => {
+            updates.years[y] = tr._yearInputs && tr._yearInputs[y] ? tr._yearInputs[y].value : '';
+          });
+
+          const confRaw = tr._confInput ? tr._confInput.value : '';
+          if (confRaw !== '') {
+            const f = Number(confRaw);
+            if (!Number.isFinite(f) || f < 0 || f > 1) {
+              alert('Confidence Score must be a number between 0 and 1.');
+              btn.disabled = false;
+              return;
+            }
+            updates.confidence_score = f;
+          } else {
+            updates.confidence_score = '';
+          }
+
+          try {
+            const resp = await fetch(`/api/job/${JOB_ID}/page/${pageNumber}/item`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                mode: 'financial',
+                item: itemName,
+                updates
+              })
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            await loadJson(pageNumber);
+          } catch (e) {
+            alert('Failed to update item. Please try again.');
+            btn.disabled = false;
+          }
+        }
+      });
+
+      tdAct.appendChild(btn);
+      tr.appendChild(tdAct);
+      tbody.appendChild(tr);
+    });
+  }
+
+  function renderKVTable(pageNumber, rows) {
+    setJsonTitle('');
+    setTableHeader(`<tr><th style="width: 22%;">Item</th><th style="width: 32%;">Value</th><th style="width: 18%;">Item Type</th><th style="width: 18%;">Confidence Score</th><th style="width: 10%;">Action</th></tr>`);
+
+    const tbody = document.getElementById('jsonTbody');
+    const jsonEmpty = document.getElementById('jsonEmpty');
+    tbody.innerHTML = '';
+    jsonEmpty.style.display = rows.length ? 'none' : 'block';
+
+    rows.forEach((r, idx) => {
+      const tr = document.createElement('tr');
+      tr.className = 'json-row';
+      tr.dataset.item = r.item;
+      tr.dataset.page = String(pageNumber);
+      tr.dataset.idx = String(idx);
+      tr.dataset.bbox = r.bbox ? JSON.stringify(r.bbox) : '';
+
+      tr.addEventListener('mouseenter', () => {
+        if (tr.dataset.bbox) {
+          try {
+            const seed = JSON.parse(tr.dataset.bbox);
+            const rowBox = _rowBBoxFromSeedBBox(seed);
+            showHighlightFromBBox(rowBox || seed);
+          } catch (_) { clearHighlight(); }
+        } else {
+          const boxes = findPhraseBBoxes(r.item);
+          if (boxes.length) showHighlightsFromBBoxes(boxes); else clearHighlight();
+        }
+      });
+      tr.addEventListener('mouseleave', () => clearHighlight());
+
+      const tdItem = document.createElement('td');
+      tdItem.textContent = r.item;
+
+      const tdValue = document.createElement('td');
+      tdValue.dataset.kind = "value";
+
+      const isDiff = r.original_value !== null && r.original_value !== undefined && String(r.original_value) !== String(r.value);
+      if (isDiff) {
+        const del = document.createElement('del');
+        del.className = 'old-value';
+        del.textContent = String(r.original_value);
+        const span = document.createElement('span');
+        span.className = 'new-value';
+        span.textContent = String(r.value);
+        tdValue.appendChild(del);
+        tdValue.appendChild(span);
+      } else {
+        tdValue.textContent = (r.value === null || r.value === undefined) ? "" : String(r.value);
+      }
+
+      const tdType = document.createElement('td');
+      tdType.dataset.kind = "item_type";
+      tdType.textContent = r.item_type ?? "";
+
+      const tdConf = document.createElement('td');
+      tdConf.dataset.kind = "confidence_score";
+      tdConf.textContent = (r.confidence_score === null || r.confidence_score === undefined) ? "" : String(r.confidence_score);
+
+      const tdAct = document.createElement('td');
+      const btn = document.createElement('button');
+      btn.className = 'btn btn-sm btn-outline-primary';
+      btn.textContent = 'Edit';
+      btn.type = 'button';
+      btn.addEventListener('click', async () => {
+        const editing = tr.dataset.editing === '1';
+        if (!editing) {
+          // enter edit mode
+          tr.dataset.editing = '1';
+          btn.textContent = 'Submit';
+          btn.classList.remove('btn-outline-primary');
+          btn.classList.add('btn-primary');
+
+          // replace cells with inputs (diff shown on view mode; edit shows current value)
+          const currentValue = (r.value === null || r.value === undefined) ? "" : String(r.value);
+          const valInput = document.createElement('input');
+          valInput.className = 'form-control form-control-sm';
+          valInput.value = currentValue;
+          tdValue.innerHTML = '';
+          tdValue.appendChild(valInput);
+
+          const typeInput = document.createElement('input');
+          typeInput.className = 'form-control form-control-sm';
+          typeInput.value = r.item_type ?? "";
+          tdType.innerHTML = '';
+          tdType.appendChild(typeInput);
+
+          const confInput = document.createElement('input');
+          confInput.className = 'form-control form-control-sm';
+          confInput.value = (r.confidence_score === null || r.confidence_score === undefined) ? "" : String(r.confidence_score);
+          confInput.placeholder = '0.0 - 1.0';
+          tdConf.innerHTML = '';
+          tdConf.appendChild(confInput);
+
+          // keep inputs accessible on tr for submit
+          tr._valInput = valInput;
+          tr._typeInput = typeInput;
+          tr._confInput = confInput;
+        } else {
+          // submit
+          btn.disabled = true;
+          const newValue = tr._valInput ? tr._valInput.value : "";
+          const newType = tr._typeInput ? tr._typeInput.value : "";
+          const newConfRaw = tr._confInput ? tr._confInput.value : "";
+          let newConf = newConfRaw;
+          if (newConfRaw !== "") {
+            const f = Number(newConfRaw);
+            if (!Number.isFinite(f) || f < 0 || f > 1) {
+              alert("Confidence Score must be a number between 0 and 1.");
+              btn.disabled = false;
+              return;
+            }
+            newConf = f;
+          }
+
+          try {
+            const resp = await fetch(`/api/job/${JOB_ID}/page/${pageNumber}/item`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                item: r.item,
+                value: newValue,
+                item_type: newType,
+                confidence_score: newConf
+              })
+            });
+            if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+            const out = await resp.json();
+
+            // Update local row data with returned values, including original and bbox if any
+            r.value = out.updated.value;
+            r.item_type = out.updated.item_type;
+            r.confidence_score = out.updated.confidence_score;
+            r.original_value = out.updated.original_value ?? r.original_value;
+            if (out.updated.bbox) r.bbox = out.updated.bbox;
+
+            // exit edit mode, re-render single row by re-rendering all rows for simplicity
+            await loadJson(pageNumber);
+          } catch (e) {
+            alert("Failed to update item. Please try again.");
+            btn.disabled = false;
+          }
+        }
+      });
+
+      tdAct.appendChild(btn);
+
+      tr.appendChild(tdItem);
+      tr.appendChild(tdValue);
+      tr.appendChild(tdType);
+      tr.appendChild(tdConf);
+      tr.appendChild(tdAct);
+
+      tbody.appendChild(tr);
+    });
+  }
+
+  async function loadJson(pageNumber) {
+    const jsonEmpty = document.getElementById('jsonEmpty');
+    const tbody = document.getElementById('jsonTbody');
+    tbody.innerHTML = '';
+    jsonEmpty.style.display = 'none';
+    clearHighlight();
+
+    try {
+      const res = await fetch(`/job/${JOB_ID}/page/${pageNumber}/json`, { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      const parsed = safeParseExtracted(data.extracted);
+      if (isEmptyExtracted(parsed)) {
+        setJsonTitle('');
+        setTableHeader('');
+        renderKVTable(pageNumber, []);
+        return;
+      }
+
+      if (isFinancialShape(parsed)) {
+        renderFinancialTable(pageNumber, parsed);
+      } else {
+        const rows = normalizeToKVRows(parsed);
+        renderKVTable(pageNumber, rows);
+      }
+    } catch (e) {
+      setJsonTitle('');
+      setTableHeader('');
+      renderKVTable(pageNumber, []);
+    }
+  }
+function setActiveThumb(pageNumber) {
+    document.querySelectorAll('.thumb-item').forEach(el => {
+      const p = parseInt(el.dataset.page, 10);
+      el.classList.toggle('active', p === pageNumber);
+    });
+  }
+
+  async function selectPage(pageNumber) {
+    if (!pageNumber) return;
+
+    setActiveThumb(pageNumber);
+
+    document.getElementById('pageNumA').textContent = pageNumber;
+    document.getElementById('pageNumB').textContent = pageNumber;
+
+    const img = document.getElementById('pageImage');
+    img.src = `/job/${JOB_ID}/page/${pageNumber}/png`;
+    img.onload = () => { rerenderHighlightIfNeeded(); };
+
+    // Load word-level OCR boxes for this page (used for hover highlights).
+    await loadOcr(pageNumber);
+
+    await loadJson(pageNumber);
+  }
+
+  // Hook up thumbnail clicks
+  document.querySelectorAll('.thumb-item').forEach(el => {
+    el.addEventListener('click', () => {
+      const pageNumber = parseInt(el.dataset.page, 10);
+      selectPage(pageNumber);
+    });
+  });
+
+  // True collapsible behavior: remove the entire left column width
+  const thumbCol = document.getElementById('thumbCol');
+  const toggleBtn = document.getElementById('toggleThumbs');
+  const reopenBtn = document.getElementById('reopenThumbs');
+  let thumbsCollapsed = false;
+
+  function setThumbsCollapsed(collapsed) {
+    thumbsCollapsed = collapsed;
+    thumbCol.classList.toggle('collapsed', thumbsCollapsed);
+    toggleBtn.textContent = thumbsCollapsed ? 'Expand' : 'Collapse';
+    reopenBtn.style.display = thumbsCollapsed ? 'block' : 'none';
+    // Layout changes can move the image; re-project highlight boxes.
+    setTimeout(() => { rerenderHighlightIfNeeded(); }, 0);
+  }
+
+  toggleBtn.addEventListener('click', () => {
+    setThumbsCollapsed(!thumbsCollapsed);
+  });
+
+  // When collapsed, show a slim left-side button to restore thumbnails
+  reopenBtn.addEventListener('click', () => {
+    setThumbsCollapsed(false);
+  });
+
+  // Initial selection
+  if (PAGES.length > 0) {
+    selectPage(PAGES[0]);
+  }
+
+  // Ensure correct initial state
+  setThumbsCollapsed(false);
+</script>
+
+{% endblock %}

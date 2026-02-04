@@ -1,0 +1,45 @@
+
+.viewer-container {
+  display: flex;
+  height: 100vh;
+}
+
+#thumbs-panel {
+  width: 220px;
+  overflow-y: auto;
+  background: #263238;
+}
+
+#page-panel {
+  flex: 1;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  overflow: hidden;
+}
+
+#json-panel {
+  width: 35%;
+  overflow-y: auto;
+  background: #fafafa;
+}
+
+#json-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+#json-table th, #json-table td {
+  border: 1px solid #ddd;
+  padding: 6px;
+}
+
+#json-table th {
+  background: #f0f0f0;
+  position: sticky;
+  top: 0;
+}
+
+.edit-btn {
+  cursor: pointer;
+}

@@ -1,0 +1,225 @@
+{% extends "layout.html" %}
+{% block content %}
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h5 class="card-title">Upload PDF</h5>
+    <form method="post" action="{{ url_for('main.upload') }}" enctype="multipart/form-data" class="row g-2 align-items-center">
+      <div class="col-md-8">
+        <input class="form-control" type="file" name="pdf" accept="application/pdf" required>
+      </div>
+      <div class="col-md-4">
+        <button class="btn btn-primary w-100" type="submit">Start Processing</button>
+      </div>
+    </form>
+    <div class="form-text mt-2">A job will be created in SQLite and processed in the background.</div>
+  </div>
+</div>
+
+<h5>Recent Jobs</h5>
+<table class="table table-sm table-hover align-middle">
+  <thead>
+    <tr>
+      <th>Job ID</th>
+      <th>File Name</th>
+      <th>Processed On</th>
+      <th style="min-width: 220px;">Status</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody>
+  {% for j in jobs %}
+    <tr>
+      <td class="mono">{{ j["id"] }}</td>
+      <td>{{ j["pdf_filename"] }}</td>
+      <td>{{ j["created_at"] }}</td>
+      <td>
+        <div class="d-flex flex-column gap-1" data-job-id="{{ j['id'] }}">
+          <div>
+            {% if j["status"] == "Complete" %}
+              <span class="badge bg-success job-status-badge" id="status-badge-{{ j['id'] }}">{{ j["status"] }}</span>
+            {% elif j["status"] == "Failed" %}
+              <span class="badge bg-danger job-status-badge" id="status-badge-{{ j['id'] }}">{{ j["status"] }}</span>
+            {% else %}
+              <span class="badge bg-warning text-dark job-status-badge" id="status-badge-{{ j['id'] }}">{{ j["status"] }}</span>
+            {% endif %}
+          </div>
+
+          {% if j["status"] != "Complete" and j["status"] != "Failed" %}
+          <div class="progress" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" style="height: 8px;">
+            <div class="progress-bar" id="progress-{{ j['id'] }}" style="width: 0%"></div>
+          </div>
+          <div class="small text-muted" id="progress-text-{{ j['id'] }}">Processing…</div>
+          {% else %}
+          <div class="progress" role="progressbar" aria-label="Job progress" aria-valuemin="0" aria-valuemax="100" style="height: 8px;">
+            <div class="progress-bar" id="progress-{{ j['id'] }}" style="width: 100%"></div>
+          </div>
+          {% endif %}
+        </div>
+      </td>
+      <td>
+        <a
+          id="view-btn-{{ j['id'] }}"
+          href="{{ url_for('main.job_detail', job_id=j['id']) }}"
+          class="btn btn-sm btn-outline-secondary {% if j['status'] != 'Complete' %}disabled{% endif %}"
+          {% if j["status"] != "Complete" %}tabindex="-1" aria-disabled="true"{% endif %}
+        >View</a>
+        <a
+          id="download-btn-{{ j['id'] }}"
+          href="{{ url_for('main.job_download_csv', job_id=j['id']) }}"
+          class="btn btn-sm btn-outline-primary ms-2 {% if j['status'] != 'Complete' %}disabled{% endif %}"
+          {% if j["status"] != "Complete" %}tabindex="-1" aria-disabled="true"{% endif %}
+        >Download</a>
+      </td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+
+<script>
+  // Home-page progress bars:
+  // - Always animate slowly over ~60s.
+  // - Poll the job status; when a job completes, fill bar + enable the View button.
+  (function () {
+    const JOBS_POLL_MS = 2500;
+    const PROGRESS_TICK_MS = 250;
+    const PROGRESS_TARGET_MS = 60000;
+    const MAX_AUTO_PROGRESS = 95; // stop here until the backend says "Complete"
+
+    // Map jobId -> { startMs, progress }
+    const progressState = new Map();
+
+    function ensureState(jobId) {
+      if (!progressState.has(jobId)) {
+        progressState.set(jobId, { startMs: Date.now(), progress: 0 });
+      }
+      return progressState.get(jobId);
+    }
+
+    function setBadge(jobId, status) {
+      const badge = document.getElementById(`status-badge-${jobId}`);
+      if (!badge) return;
+      badge.textContent = status;
+      badge.classList.remove('bg-success', 'bg-danger', 'bg-warning', 'text-dark');
+
+      if (status === 'Complete') {
+        badge.classList.add('bg-success');
+      } else if (status === 'Failed') {
+        badge.classList.add('bg-danger');
+      } else {
+        badge.classList.add('bg-warning', 'text-dark');
+      }
+    }
+
+    function setProgress(jobId, pct) {
+      const bar = document.getElementById(`progress-${jobId}`);
+      if (bar) bar.style.width = `${pct}%`;
+    }
+
+    function setProgressText(jobId, txt) {
+      const el = document.getElementById(`progress-text-${jobId}`);
+      if (el) el.textContent = txt;
+    }
+
+    function enableView(jobId, enabled) {
+      const btn = document.getElementById(`view-btn-${jobId}`);
+      if (!btn) return;
+      if (enabled) {
+        btn.classList.remove('disabled');
+        btn.removeAttribute('tabindex');
+        btn.removeAttribute('aria-disabled');
+      } else {
+        btn.classList.add('disabled');
+        btn.setAttribute('tabindex', '-1');
+        btn.setAttribute('aria-disabled', 'true');
+      }
+    }
+
+    function enableDownload(jobId, enabled) {
+      const btn = document.getElementById(`download-btn-${jobId}`);
+      if (!btn) return;
+      if (enabled) {
+        btn.classList.remove('disabled');
+        btn.removeAttribute('tabindex');
+        btn.removeAttribute('aria-disabled');
+      } else {
+        btn.classList.add('disabled');
+        btn.setAttribute('tabindex', '-1');
+        btn.setAttribute('aria-disabled', 'true');
+      }
+    }
+
+    function tickProgress() {
+      // Only tick in-progress jobs that have a progress bar.
+      document.querySelectorAll('[id^="progress-"]').forEach((barEl) => {
+        const jobId = parseInt(barEl.id.replace('progress-', ''), 10);
+        if (Number.isNaN(jobId)) return;
+
+        const badge = document.getElementById(`status-badge-${jobId}`);
+        const status = badge ? badge.textContent : '';
+        if (status === 'Complete' || status === 'Failed') {
+          setProgress(jobId, 100);
+          return;
+        }
+
+        const st = ensureState(jobId);
+        const elapsed = Date.now() - st.startMs;
+        const autoPct = Math.min(MAX_AUTO_PROGRESS, Math.floor((elapsed / PROGRESS_TARGET_MS) * MAX_AUTO_PROGRESS));
+        if (autoPct > st.progress) st.progress = autoPct;
+
+        setProgress(jobId, st.progress);
+      });
+    }
+
+    async function pollJobs() {
+      try {
+        const resp = await fetch('{{ url_for("main.api_jobs") }}', { headers: { 'Accept': 'application/json' } });
+        if (!resp.ok) return;
+        const jobs = await resp.json();
+
+        for (const j of jobs) {
+          const jobId = j.id;
+          const status = j.status;
+          if (document.getElementById(`status-badge-${jobId}`)) {
+            setBadge(jobId, status);
+
+            if (status === 'Complete') {
+              setProgress(jobId, 100);
+              setProgressText(jobId, 'Completed');
+              enableView(jobId, true);
+              enableDownload(jobId, true);
+            } else if (status === 'Failed') {
+              setProgress(jobId, 100);
+              setProgressText(jobId, 'Failed');
+              enableView(jobId, false);
+              enableDownload(jobId, false);
+            } else {
+              enableView(jobId, false);
+              enableDownload(jobId, false);
+              // Keep whatever the auto-progress is doing.
+              setProgressText(jobId, 'Processing…');
+            }
+          }
+        }
+      } catch (e) {
+        // ignore polling errors
+      }
+    }
+
+    // Initial pass: disable View buttons for in-progress jobs (server render already tries, but ensure).
+    document.querySelectorAll('[id^="view-btn-"]').forEach((btnEl) => {
+      const jobId = parseInt(btnEl.id.replace('view-btn-', ''), 10);
+      const badge = document.getElementById(`status-badge-${jobId}`);
+      const status = badge ? badge.textContent : '';
+      enableView(jobId, status === 'Complete');
+      enableDownload(jobId, status === 'Complete');
+    });
+
+    setInterval(tickProgress, PROGRESS_TICK_MS);
+    setInterval(pollJobs, JOBS_POLL_MS);
+    tickProgress();
+    pollJobs();
+  })();
+</script>
+
+{% endblock %}
