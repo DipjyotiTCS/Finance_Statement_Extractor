@@ -59,53 +59,9 @@ def _normalize_token(s: str) -> str:
 
 
 def _generate_word_coords_json(png_path: str, out_json_path: str, page_number: int) -> None:
-    """Run Tesseract OCR and write word-level bounding boxes to JSON.
-
-    JSON format:
-    {
-      "page_number": 1,
-      "image": {"width": 2480, "height": 3508},
-      "words": [
-        {"text":"...","conf":92,"x":10,"y":20,"width":30,"height":12,
-         "block":1,"par":1,"line":2,"word":5}
-      ]
-    }
-    """
-    img = Image.open(png_path)
-    w, h = img.size
-
-    data = pytesseract.image_to_data(img, output_type=Output.DICT)
-    n = len(data.get("text", []))
-    words: List[Dict[str, Any]] = []
-    for i in range(n):
-        txt = (data["text"][i] or "").strip()
-        if not txt:
-            continue
-        try:
-            conf = float(data.get("conf", [""])[i])
-        except Exception:
-            conf = -1
-        # Keep even low-conf words; filtering can be done client-side.
-        words.append({
-            "text": txt,
-            "conf": conf,
-            "x": int(data["left"][i]),
-            "y": int(data["top"][i]),
-            "width": int(data["width"][i]),
-            "height": int(data["height"][i]),
-            "block": int(data.get("block_num", [0])[i]),
-            "par": int(data.get("par_num", [0])[i]),
-            "line": int(data.get("line_num", [0])[i]),
-            "word": int(data.get("word_num", [0])[i]),
-        })
-
-    payload = {
-        "page_number": page_number,
-        "image": {"width": w, "height": h},
-        "words": words,
-    }
-    with open(out_json_path, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False)
+    """Generate OCR JSON for UI highlighting using the same OCR logic as extraction."""
+    from .ocr_utils import write_ocr_json
+    write_ocr_json(png_path, out_json_path, page_number)
 
 def get_png_path_for_page(db_path: str, job_id: str, page_index: int = 0) -> Optional[str]:
     """

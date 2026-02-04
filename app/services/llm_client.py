@@ -150,96 +150,13 @@ class LLMClient:
 
     
     def ocr_page_to_json(self, png_path: str, page_number: int) -> Dict[str, Any]:
+        """Run Tesseract OCR and return a compact JSON payload.
+
+        NOTE: This delegates to app.services.ocr_utils so the *same* OCR logic/schema
+        is used for both extraction and UI highlighting.
         """
-        Run Tesseract OCR and return a compact, LLM-friendly JSON payload.
-
-        The payload includes:
-        - full text
-        - per-word boxes + confidence
-        - per-line aggregation (best-effort)
-        """
-        from PIL import Image as _Image
-        from pytesseract import Output as _Output
-
-        img = _Image.open(png_path)
-        width, height = img.size
-
-        # Language: allow override via env; default to eng.
-        lang = os.environ.get("TESSERACT_LANG", "eng+dan+fao").strip() or "eng"
-
-        config = os.environ.get("TESSERACT_CONFIG", "--oem 1 --psm 6 --dpi 300")
-
-        data = pytesseract.image_to_data(img, output_type=_Output.DICT, lang=lang, config=config)
-
-        words = []
-        # Build word list
-        n = len(data.get("text", []))
-        for i in range(n):
-            txt = (data["text"][i] or "").strip()
-            if not txt:
-                continue
-            try:
-                conf = float(data.get("conf", [])[i])
-            except Exception:
-                conf = -1.0
-
-            x = int(data.get("left", [0])[i] or 0)
-            y = int(data.get("top", [0])[i] or 0)
-            w = int(data.get("width", [0])[i] or 0)
-            h = int(data.get("height", [0])[i] or 0)
-            words.append(
-                {
-                    "text": txt,
-                    "conf": conf,
-                    "bbox": [x, y, x + w, y + h],
-                    "block": int(data.get("block_num", [0])[i] or 0),
-                    "par": int(data.get("par_num", [0])[i] or 0),
-                    "line": int(data.get("line_num", [0])[i] or 0),
-                    "word": int(data.get("word_num", [0])[i] or 0),
-                }
-            )
-
-        # Aggregate into lines (block, par, line)
-        lines_map = {}
-        for w in words:
-            k = (w["block"], w["par"], w["line"])
-            lines_map.setdefault(k, []).append(w)
-
-        lines = []
-        for k, ws in lines_map.items():
-            ws_sorted = sorted(ws, key=lambda t: (t["bbox"][0], t["bbox"][1]))
-            line_text = " ".join([t["text"] for t in ws_sorted]).strip()
-            if not line_text:
-                continue
-            x1 = min(t["bbox"][0] for t in ws_sorted)
-            y1 = min(t["bbox"][1] for t in ws_sorted)
-            x2 = max(t["bbox"][2] for t in ws_sorted)
-            y2 = max(t["bbox"][3] for t in ws_sorted)
-            # average conf excluding -1
-            confs = [t["conf"] for t in ws_sorted if t["conf"] is not None and t["conf"] >= 0]
-            avg_conf = sum(confs) / len(confs) if confs else -1
-
-            lines.append(
-                {
-                    "text": line_text,
-                    "bbox": [x1, y1, x2, y2],
-                    "avg_conf": avg_conf,
-                    "block": k[0],
-                    "par": k[1],
-                    "line": k[2],
-                }
-            )
-
-        # Full text
-        full_text = "\n".join([ln["text"] for ln in sorted(lines, key=lambda t: (t["bbox"][1], t["bbox"][0]))])
-
-        return {
-            "page_number": page_number,
-            "image": {"width": width, "height": height},
-            "text": full_text,
-            "lines": lines,
-            "words": words,
-        }
+        from .ocr_utils import ocr_page_to_json as _ocr_page_to_json
+        return _ocr_page_to_json(png_path, page_number)
 
     def _openai_extract_from_ocr_json(self, ocr_payload: Dict[str, Any]) -> Dict[str, Any]:
         """

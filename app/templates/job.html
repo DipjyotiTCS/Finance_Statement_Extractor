@@ -503,7 +503,19 @@ function isFinancialShape(extractedObj) {
     try {
       const res = await fetch(`/job/${JOB_ID}/page/${pageNumber}/ocr`);
       const data = await res.json();
-      OCR_CACHE = { pageNumber, words: data.words || [], image: data.image || null, lang: data.lang || data.language || null };
+      const rawWords = data.words || [];
+      const normWords = rawWords.map(w => {
+        if (!w) return w;
+        if (Array.isArray(w.bbox) && w.bbox.length === 4 && (w.x === undefined || w.width === undefined)) {
+          const x1 = Number(w.bbox[0]) || 0;
+          const y1 = Number(w.bbox[1]) || 0;
+          const x2 = Number(w.bbox[2]) || 0;
+          const y2 = Number(w.bbox[3]) || 0;
+          return Object.assign({}, w, { x: x1, y: y1, width: Math.max(0, x2 - x1), height: Math.max(0, y2 - y1) });
+        }
+        return w;
+      });
+      OCR_CACHE = { pageNumber, words: normWords, image: data.image || null, lang: data.lang || data.language || null };
     } catch (e) {
       OCR_CACHE = { pageNumber, words: [], image: null, lang: null };
     }

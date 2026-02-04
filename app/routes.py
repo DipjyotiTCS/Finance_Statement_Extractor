@@ -258,19 +258,28 @@ def job_download_csv(job_id: int):
         years_final = sorted(values_by_year.keys(), reverse=True)
 
     out = io.StringIO()
-    writer = csv.writer(out)
-    writer.writerow(["year"] + cols_in_order)
+    # Produce a "long" CSV that Excel opens cleanly:
+    # Experian Taxonomy, Value <year1>, Value <year2>
+    # (year1/year2 are fixed to 2024/2023 as requested; if missing, cells remain blank)
+    y1, y2 = "2024", "2023"
 
-    for y in years_final:
-        bucket = values_by_year.get(y, {})
-        row = [y]
-        for col in cols_in_order:
-            val = bucket.get(col, "")
-            # Preserve separators as-is; stringify complex values
-            if isinstance(val, (dict, list)):
-                val = json.dumps(val, ensure_ascii=False)
-            row.append(val)
-        writer.writerow(row)
+    writer = csv.writer(out)  # default delimiter=',' (Excel-friendly with UTF-8 BOM below)
+    writer.writerow(["Experian Taxonomy", f"Value {y1}", f"Value {y2}"])
+
+    bucket_y1 = values_by_year.get(y1, {})
+    bucket_y2 = values_by_year.get(y2, {})
+
+    for taxonomy in cols_in_order:
+        v1 = bucket_y1.get(taxonomy, "")
+        v2 = bucket_y2.get(taxonomy, "")
+
+        # Preserve separators as-is; stringify complex values
+        if isinstance(v1, (dict, list)):
+            v1 = json.dumps(v1, ensure_ascii=False)
+        if isinstance(v2, (dict, list)):
+            v2 = json.dumps(v2, ensure_ascii=False)
+
+        writer.writerow([taxonomy, v1, v2])
 
     data = out.getvalue().encode("utf-8-sig")  # Excel-friendly BOM
     bio = io.BytesIO(data)
