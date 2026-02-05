@@ -11,6 +11,10 @@ def create_app():
     app.config["UPLOADS_DIR"] = os.path.join(app.config["DATA_DIR"], "uploads")
     app.config["JOBS_DIR"] = os.path.join(app.config["DATA_DIR"], "jobs")
     app.config["DB_PATH"] = os.path.join(app.config["DATA_DIR"], "app.db")
+    app.config["TAXONOMY_TEMPLATE_CSV"] = os.environ.get(
+        "TAXONOMY_TEMPLATE_CSV",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "taxonomy_template.csv")),
+    )
 
     os.makedirs(app.config["UPLOADS_DIR"], exist_ok=True)
     os.makedirs(app.config["JOBS_DIR"], exist_ok=True)

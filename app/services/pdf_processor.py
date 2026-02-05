@@ -122,11 +122,48 @@ def process_job(db_path: str, job_id: int) -> None:
               (temp_folder, start_idx + 1, doc.page_count, job_id))
 
             # Phase 1: per-page extraction (PNG -> JSON)
+            # Phase 1: extract high-level metadata from the first page (company/year/date)
             meta = llm._openai_extract_company_year_from_png(
                 png_path=initial_page
             )
-            e(conn, "INSERT OR REPLACE INTO job_meta(job_id, company_name, publication_year, publication_date) VALUES (?,?,?,?)",
-              (job_id, meta.get("company_name"), meta.get("publication_year"), meta.get("publication_date")))
+
+            # Derive the header fields displayed on job.html (and exported to CSV)
+            pdf_filename = (job["pdf_filename"] or "")
+            pdf_idnumber = None
+            if pdf_filename:
+                base = os.path.basename(pdf_filename)
+                m = re.match(r"(\d+)[_\-].*\.pdf$", base, flags=re.IGNORECASE)
+                if m:
+                    pdf_idnumber = m.group(1)
+
+            publication_date = meta.get("publication_date")
+            pub_yyyymmdd = None
+            if publication_date:
+                pub_yyyymmdd = re.sub(r"\D", "", str(publication_date))
+                if len(pub_yyyymmdd) != 8:
+                    pub_yyyymmdd = None
+
+            # Deterministic 1-year period ending one day before publication date (if available)
+            period_start = None
+            period_end = None
+            if pub_yyyymmdd:
+                try:
+                    pub_dt = datetime.datetime.strptime(pub_yyyymmdd, "%Y%m%d").date()
+                    end_dt = pub_dt - datetime.timedelta(days=1)
+                    start_dt = end_dt - datetime.timedelta(days=365)
+                    period_start = start_dt.strftime("%Y%m%d")
+                    period_end = end_dt.strftime("%Y%m%d")
+                except Exception:
+                    pass
+
+            kob_no = "KOB-0001"
+            account_type = "NOR"
+            account_class = "B"
+            currency_code = "DKK"
+
+            e(conn, "INSERT OR REPLACE INTO job_meta(job_id, company_name, publication_year, publication_date, kob_no, pdf_idnumber, account_type, period_start, period_end, account_class, currency_code) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+              (job_id, meta.get("company_name"), meta.get("publication_year"), pub_yyyymmdd or meta.get("publication_date"), kob_no, pdf_idnumber, account_type, period_start, period_end, account_class, currency_code))
+
             
             # Phase 2: per-page extraction (PNG -> JSON)
             #From the render check first 3 pages if they have TOC

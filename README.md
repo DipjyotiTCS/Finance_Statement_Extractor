@@ -31,3 +31,13 @@ If you want to wire a real LLM later, set:
 - `OPENAI_API_KEY=...`
 
 and update `app/services/llm_client.py` accordingly.
+
+
+## Experian taxonomy CSV export
+
+The `/job/<job_id>/download/csv` endpoint now generates a **semicolon-delimited** CSV using the provided taxonomy template.
+
+- Default template path: `taxonomy_template.csv` (project root)
+- Override via env var: `TAXONOMY_TEMPLATE_CSV=/absolute/path/to/template.csv`
+
+If an extracted label does not match a taxonomy header directly, the app will use an LLM (if `OPENAI_API_KEY` is set) to choose the best match from a shortlist and cache the decision in sqlite (`taxonomy_match_cache`).

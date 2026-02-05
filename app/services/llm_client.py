@@ -825,3 +825,145 @@ class LLMClient:
             "numbers_found": nums[:200],
             "text_excerpt": "\n".join(lines[:60])
         }
+
+
+    # -------------------------
+    # Taxonomy matching (CSV population)
+    # -------------------------
+    def match_taxonomy_field(
+        self,
+        db_path: str,
+        source_label: str,
+        candidate_fields: List[str],
+        context_hint: str = ""
+    ) -> Dict[str, Any]:
+        """
+        Map an extracted label (source_label) to one of the candidate_fields.
+
+        - Uses sqlite cache table taxonomy_match_cache to avoid repeated LLM calls.
+        - If LLM is not configured, falls back to a simple heuristic.
+
+        Returns:
+          {
+            "match": <str or None>,
+            "confidence": <float 0..1>,
+            "reason": <str>
+          }
+        """
+        source_label_norm = (source_label or "").strip()
+        if not source_label_norm or not candidate_fields:
+            return {"match": None, "confidence": 0.0, "reason": "empty input"}
+
+        # 1) Cache lookup
+        try:
+            conn = get_conn(db_path)
+            try:
+                row = q(
+                    conn,
+                    """
+                    SELECT matched_field, confidence, reason
+                    FROM taxonomy_match_cache
+                    WHERE source_label = ?
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (source_label_norm,),
+                )
+                if row:
+                    r = row[0]
+                    matched = r["matched_field"]
+                    if matched and matched in candidate_fields:
+                        return {
+                            "match": matched,
+                            "confidence": float(r.get("confidence") or 0.0),
+                            "reason": str(r.get("reason") or "cached"),
+                        }
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        # 2) Heuristic fallback if no key / no client
+        if not (os.environ.get("OPENAI_API_KEY") or "").strip():
+            # best-effort fuzzy pick by normalized overlap
+            def _norm(s: str) -> str:
+                return re.sub(r"[^a-z0-9]+", "", (s or "").lower())
+            srcn = _norm(source_label_norm)
+            best = None
+            best_score = 0.0
+            for f in candidate_fields:
+                fn = _norm(f)
+                # crude score: common prefix + containment
+                score = 0.0
+                if srcn == fn:
+                    score = 1.0
+                elif srcn and (srcn in fn or fn in srcn):
+                    score = 0.85
+                else:
+                    # character overlap
+                    inter = len(set(srcn) & set(fn))
+                    denom = max(1, len(set(srcn) | set(fn)))
+                    score = inter / denom
+                if score > best_score:
+                    best_score = score
+                    best = f
+            reason = "heuristic"
+            out = {"match": best if best_score >= 0.35 else None, "confidence": float(best_score), "reason": reason}
+            return out
+
+        # 3) LLM-based selection from candidate list
+        model = (os.environ.get("OPENAI_MODEL_TEXT") or os.environ.get("OPENAI_MODEL_VISION") or "gpt-4o-mini").strip()
+        # Keep prompt compact; candidate_fields should already be a small shortlist.
+        prompt = (
+            "You are mapping an extracted financial statement label to an Experian taxonomy CSV field.\n"
+            "Return STRICT JSON only.\n\n"
+            f"Extracted label: {source_label_norm!r}\n"
+            f"Context hint (may be empty): {context_hint!r}\n\n"
+            "Choose the best matching CSV field from this list (exactly as written), or null if none fit:\n"
+            + "\n".join([f"- {c}" for c in candidate_fields]) +
+            "\n\n"
+            "Output schema: {\"match\": <string or null>, \"confidence\": <number 0..1>, \"reason\": <string>}\n"
+        )
+
+        try:
+            resp = self.client.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                response_format={"type": "json_object"},
+            )
+            obj = json.loads(resp.choices[0].message.content or "{}")
+            match = obj.get("match")
+            conf = obj.get("confidence")
+            reason = obj.get("reason") or "llm"
+            if isinstance(match, str):
+                match = match.strip()
+            if match not in candidate_fields:
+                match = None
+            try:
+                conf = float(conf)
+            except Exception:
+                conf = 0.0
+
+            out = {"match": match, "confidence": max(0.0, min(1.0, conf)), "reason": str(reason)}
+
+        except Exception as ex:
+            out = {"match": None, "confidence": 0.0, "reason": f"llm_error: {ex}"}
+
+        # 4) Persist to cache (best effort)
+        try:
+            conn = get_conn(db_path)
+            try:
+                e(
+                    conn,
+                    """
+                    INSERT INTO taxonomy_match_cache (source_label, matched_field, confidence, reason, created_at)
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    """,
+                    (source_label_norm, out.get("match"), out.get("confidence"), out.get("reason")),
+                )
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+        return out
