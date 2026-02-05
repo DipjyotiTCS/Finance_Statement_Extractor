@@ -2,13 +2,14 @@ import os
 import re
 import json
 import base64
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Set
 from openai import OpenAI
 import sqlite3
 import cv2
 import pytesseract
 
 from ..db import get_conn, q, e
+from copy import deepcopy
 
 class LLMClient:
 
@@ -116,8 +117,7 @@ class LLMClient:
         )
 
         return json.loads(resp.choices[0].message.content or "{}")
-        
-    
+         
     def process_pages(self, job_id, extraction_payload):
         """
         New extraction flow:
@@ -130,7 +130,14 @@ class LLMClient:
             try:
                 ocr_payload = self.ocr_page_to_json(str(png_path), page_number=page_number)
 
-                extracted = self._openai_extract_from_ocr_json(ocr_payload)
+                print("Calling LLM to get OCR data extraction")
+                ocr_extracted = self._openai_extract_from_ocr_json(ocr_payload)
+
+                print("Calling LLM to get visual data extraction")
+                llm_extarcted = self.process_other_pages(job_id, page_number, png_path)
+
+                print("Performing QC for json check")
+                extracted = self.verify_ocr_against_llm(ocr_extracted, llm_extarcted)
 
                 # Persist extracted JSON back to DB
                 db_path = "data/app.db"
@@ -205,6 +212,7 @@ class LLMClient:
             "Nota Column RULES:\n"
                 "-Pay special attention to the Nota column if its present. Fetch the correct Nota values against each row item. \n"
                 "-Look for Nota column values for each row. If no nota is found for that row keep the json value as blank\n"
+                "-Do not provide arbitary nota values. \n"
                 "-Never use numeric 0 for nota\n"
 
             "Important General Rules:\n"
@@ -532,27 +540,11 @@ class LLMClient:
             print("Job id & page number", job_id, page_number)
             print("Extracted response:", json_response)
 
-            sql = """
-                UPDATE job_pages
-                SET extracted_json = ?
-                WHERE job_id = ? AND page_number = ?
-                """
-
-            with sqlite3.connect(db_path) as conn:
-                conn.execute(
-                    sql,
-                    (
-                        json.dumps(json_response, ensure_ascii=False),
-                        int(job_id),
-                        int(page_number),
-                    )
-                )
-                conn.commit()
+            return json_response            
 
         except Exception as ex:
             print("exception occurred while extracting records from page", ex)
-
-        return "complete"
+            return "complete"
 
     def _openai_extract_page_json(self, png_path: str, page_number: int) -> Dict[str, Any]:
         """
@@ -606,6 +598,182 @@ class LLMClient:
         # Add png_path for traceability (matches your existing mock output)
         data["png_path"] = png_path
         return data
+
+    def compare_json(self, ocr_json: Dict[str, Any], llm_json: Dict[str, Any],) -> Dict[str, Any]:
+        """
+        Merge two extracted financial JSONs.
+
+        Rules:
+        1) For any field present in both sources, pick the value from the source whose
+        row confidence_score is LOWER.
+        2) If a row is missing in llm_json but present in ocr_json, keep the OCR row.
+        If missing in ocr_json but present in llm_json, keep the LLM row.
+        3) Years are unioned (OCR years + LLM years) in original order preference: OCR first then LLM.
+
+        Assumptions:
+        - Both inputs follow structure:
+        {
+            "page_title": str,
+            "years": [str, ...],
+            "rows": {
+            "<row_key>": {
+                "Experian Value": str,
+                "<year>": str,
+                "nota": str,
+                "confidence_score": float|int
+            },
+            ...
+            }
+        }
+        - confidence_score exists at row level (if missing, treated as +inf).
+        """
+
+        def _get_conf(row: Optional[Dict[str, Any]]) -> float:
+            if not isinstance(row, dict):
+                return float("inf")
+            v = row.get("confidence_score")
+            try:
+                return float(v)
+            except Exception:
+                return float("inf")
+
+        def _union_years(yrs1: Any, yrs2: Any) -> List[str]:
+            out: List[str] = []
+            seen: Set[str] = set()
+            for src in (yrs1, yrs2):
+                if isinstance(src, list):
+                    for y in src:
+                        ys = str(y)
+                        if ys not in seen:
+                            seen.add(ys)
+                            out.append(ys)
+            return out
+
+        def _keys_union(d1: Any, d2: Any) -> Set[str]:
+            s: Set[str] = set()
+            if isinstance(d1, dict):
+                s |= set(d1.keys())
+            if isinstance(d2, dict):
+                s |= set(d2.keys())
+            return s
+
+        # Base output: start with OCR (so "missing in LLM but present in OCR" is naturally preserved)
+        merged: Dict[str, Any] = deepcopy(ocr_json) if isinstance(ocr_json, dict) else {}
+        if not isinstance(merged, dict):
+            merged = {}
+
+        # Page title: prefer OCR, else LLM
+        if not merged.get("page_title") and isinstance(llm_json, dict):
+            merged["page_title"] = llm_json.get("page_title", "")
+
+        # Years: union
+        merged["years"] = _union_years(
+            (ocr_json or {}).get("years"),
+            (llm_json or {}).get("years"),
+        )
+
+        ocr_rows = (ocr_json or {}).get("rows") if isinstance(ocr_json, dict) else {}
+        llm_rows = (llm_json or {}).get("rows") if isinstance(llm_json, dict) else {}
+        if not isinstance(ocr_rows, dict):
+            ocr_rows = {}
+        if not isinstance(llm_rows, dict):
+            llm_rows = {}
+
+        merged_rows: Dict[str, Any] = {}
+        merged["rows"] = merged_rows
+
+        # Union of row keys
+        for row_key in sorted(_keys_union(ocr_rows, llm_rows)):
+            o_row = ocr_rows.get(row_key)
+            l_row = llm_rows.get(row_key)
+
+            # If only one exists, keep it
+            if isinstance(o_row, dict) and not isinstance(l_row, dict):
+                merged_rows[row_key] = deepcopy(o_row)
+                continue
+            if isinstance(l_row, dict) and not isinstance(o_row, dict):
+                merged_rows[row_key] = deepcopy(l_row)
+                continue
+            if not isinstance(o_row, dict) and not isinstance(l_row, dict):
+                continue  # nothing usable
+
+            # Both exist: decide per-field using LOWER confidence_score at row level
+            o_conf = _get_conf(o_row)
+            l_conf = _get_conf(l_row)
+
+            # Union of fields across both rows (Experian Value, years, nota, etc.)
+            fields = _keys_union(o_row, l_row)
+
+            chosen: Dict[str, Any] = {}
+            for f in fields:
+                o_has = f in o_row
+                l_has = f in l_row
+
+                if o_has and not l_has:
+                    chosen[f] = deepcopy(o_row[f])
+                elif l_has and not o_has:
+                    chosen[f] = deepcopy(l_row[f])
+                else:
+                    # Both have the field: take the value from the row with LOWER conf
+                    if o_conf <= l_conf:
+                        chosen[f] = deepcopy(o_row[f])
+                    else:
+                        chosen[f] = deepcopy(l_row[f])
+
+            # Ensure confidence_score reflects what we chose (the lower one)
+            print("Confidance score ", o_conf, l_conf)
+            chosen["confidence_score"] = round(min(o_conf, l_conf), 2)
+            print("Final json", json.dumps(chosen))
+            merged_rows[row_key] = chosen
+
+        return merged
+
+
+    def verify_ocr_against_llm(self, ocr_json: Dict[str, Any], llm_json: Dict[str, Any],) -> Dict[str, Any]:
+        """
+        Verify OCR JSON against LLM JSON.
+
+        Rules:
+        - Final JSON structure is based ONLY on ocr_json.
+        - For each row in ocr_json:
+            * If same row key exists in llm_json -> keep confidence_score unchanged
+            * If row key NOT found in llm_json -> reduce confidence_score by `penalty`
+        - confidence_score is floored at 0.0 and rounded to 2 decimals
+        """
+
+        penalty = 0.2
+        result = deepcopy(ocr_json)
+
+        ocr_rows = result.get("rows", {})
+        llm_rows = llm_json.get("rows", {}) if isinstance(llm_json, dict) else {}
+
+        if not isinstance(ocr_rows, dict):
+            return result  # nothing to verify
+
+        for row_key, row_val in ocr_rows.items():
+            if not isinstance(row_val, dict):
+                continue
+
+            # Current OCR confidence
+            try:
+                conf = float(row_val.get("confidence_score", 0.0))
+            except Exception:
+                conf = 0.0
+
+            # If row NOT found in LLM, apply penalty
+            if not isinstance(llm_rows, dict) or row_key not in llm_rows:
+                conf = conf - penalty
+
+            # Normalize confidence
+            conf = max(conf, 0.0)
+            conf = round(conf, 2)
+
+            row_val["confidence_score"] = conf
+            ocr_rows[row_key] = row_val
+
+        result["rows"] = ocr_rows
+        return result
+
 
     # --------------------
     # Mock implementations
