@@ -130,6 +130,62 @@
     .page-img { max-height: none; }
     .json-box pre { height: auto; }
   }
+
+  /* ------------------------------
+     Maximize Extracted JSON modal
+     ------------------------------ */
+  .xjson-modal-overlay{
+    position: fixed;
+    inset: 0;
+    display: none;
+    background: rgba(0,0,0,.55);
+    z-index: 9999;
+  }
+  .xjson-modal-overlay.is-open{ display: block; }
+
+  /* 50px border on all sides */
+  .xjson-modal-shell{
+    position: absolute;
+    top: 50px; left: 50px; right: 50px; bottom: 50px;
+    background: #fff;
+    border-radius: 14px;
+    box-shadow: 0 14px 40px rgba(0,0,0,.28);
+    overflow: hidden;
+  }
+  .xjson-modal-close{
+    position: absolute;
+    top: 10px;
+    right: 12px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font-size: 20px;
+    line-height: 1;
+    padding: 8px 10px;
+    border-radius: 10px;
+  }
+  .xjson-modal-close:hover{ background: rgba(0,0,0,.06); }
+
+  .xjson-modal-body{
+    height: 100%;
+    padding: 46px 16px 16px 16px; /* top padding leaves room for close button */
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .xjson-modal-tablewrap{
+    flex: 1 1 auto;
+    overflow: auto; /* vertical + horizontal */
+    border-radius: 12px;
+  }
+
+  /* Make wide tables scroll horizontally in modal */
+  .xjson-modal-tablewrap table{
+    width: max-content;
+    min-width: 100%;
+  }
+
 </style>
 
 <div class="d-flex align-items-center justify-content-between mb-2">
@@ -233,7 +289,10 @@
       <div class="panel extracted-panel">
         <div class="panel-head">
           <div class="fw-semibold">Extracted JSON</div>
-          <div class="text-muted small">Page <span id="pageNumB">-</span></div>
+          <div class="d-flex align-items-center gap-2">
+            <div class="text-muted small mb-0">Page <span id="pageNumB">-</span></div>
+            <button type="button" id="maximizeJsonBtn" class="btn btn-sm btn-outline-secondary" title="Maximize Extracted JSON" aria-label="Maximize Extracted JSON">⛶</button>
+          </div>
         </div>
         
   <div class="panel-body-shared panel-body-extracted">
@@ -260,6 +319,27 @@
     </div>
   </div>
 </div>
+
+
+<!-- Maximize Extracted JSON Modal -->
+<div id="extractedJsonModal" class="xjson-modal-overlay" aria-hidden="true">
+  <div class="xjson-modal-shell" role="dialog" aria-modal="true" aria-label="Extracted JSON">
+    <button type="button" id="closeJsonModalBtn" class="xjson-modal-close" aria-label="Close">✕</button>
+    <div class="xjson-modal-body">
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <div class="small text-muted">Title: <span id="modalPageTitle" class="fw-semibold">-</span></div>
+        <div class="small text-muted">Page <span id="modalPageNum">-</span></div>
+      </div>
+      <div class="xjson-modal-tablewrap">
+        <table class="table table-sm table-hover align-middle table-bordered json-table">
+          <thead id="modalJsonThead"></thead>
+          <tbody id="modalJsonTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 
 <script>
   const JOB_ID = {{ job['id'] }};
@@ -300,6 +380,31 @@
     if (v === null || v === undefined) return "";
     if (Array.isArray(v)) return "array";
     return typeof v;
+  }
+
+  // Display confidence_score (usually 0..1) as a percentage (e.g., 0.7 -> "70%")
+  function formatConfidence(conf) {
+    if (conf === null || conf === undefined) return '';
+
+    // Preserve already-formatted percentages
+    if (typeof conf === 'string') {
+      const s = conf.trim();
+      if (!s) return '';
+      if (s.endsWith('%')) return s;
+      const n = parseFloat(s.replace(',', '.'));
+      if (!Number.isFinite(n)) return s;
+      conf = n;
+    }
+
+    if (typeof conf !== 'number' || !Number.isFinite(conf)) return String(conf);
+
+    // Most of the pipeline uses 0..1. Display as percentage.
+    if (conf <= 1) return String(Math.round(conf * 100)) + '%';
+
+    // If something already produced 0..100, treat as percent for display.
+    if (conf <= 100) return String(Math.round(conf)) + '%';
+
+    return String(conf);
   }
 
   
@@ -762,6 +867,7 @@ function isFinancialShape(extractedObj) {
     return `<tr>
       <th style="min-width:220px;">Items (${lang})</th>
       <th style="min-width:220px;">Items (en)</th>
+      <th style="min-width:220px;">Experian Taxonomy</th>
       ${yearThs}
       <th>Note</th>
       <th style="width:140px;">Confidence</th>
@@ -806,6 +912,11 @@ tbody.innerHTML = '';
 const tdExp = document.createElement('td');
 tdExp.textContent = rowObj["Experian Value"] ?? rowObj["experian_value"] ?? "";
 tr.appendChild(tdExp);
+
+// Experian Taxonomy cell
+const tdTax = document.createElement('td');
+tdTax.textContent = rowObj["taxonomy_term"] ?? rowObj["taxonomyTerm"] ?? "";
+tr.appendChild(tdTax);
 
       // Year cells
       const originalMap = (rowObj && typeof rowObj._original === 'object' && rowObj._original !== null) ? rowObj._original : {};
@@ -861,14 +972,14 @@ tr.appendChild(tdExp);
       if (confDiff) {
         const del = document.createElement('del');
         del.className = 'old-value';
-        del.textContent = String(oldConf);
+        del.textContent = formatConfidence(oldConf);
         const span = document.createElement('span');
         span.className = 'new-value';
-        span.textContent = String(curConf);
+        span.textContent = formatConfidence(curConf);
         tdConf.appendChild(del);
         tdConf.appendChild(span);
       } else {
-        tdConf.textContent = (curConf === null || curConf === undefined) ? '' : String(curConf);
+        tdConf.textContent = formatConfidence(curConf);
       }
       tr.appendChild(tdConf);
 
@@ -1014,7 +1125,7 @@ tr.appendChild(tdExp);
 
       const tdConf = document.createElement('td');
       tdConf.dataset.kind = "confidence_score";
-      tdConf.textContent = (r.confidence_score === null || r.confidence_score === undefined) ? "" : String(r.confidence_score);
+      tdConf.textContent = formatConfidence(r.confidence_score);
 
       const tdAct = document.createElement('td');
       const btn = document.createElement('button');
@@ -1210,6 +1321,66 @@ function setActiveThumb(pageNumber) {
 
   // Ensure correct initial state
   setThumbsCollapsed(false);
+
+  // ------------------------------
+  // Maximize Extracted JSON modal
+  // ------------------------------
+  (function () {
+    const btnOpen = document.getElementById('maximizeJsonBtn');
+    const overlay = document.getElementById('extractedJsonModal');
+    const btnClose = document.getElementById('closeJsonModalBtn');
+    const srcHead = document.getElementById('jsonThead');
+    const srcBody = document.getElementById('jsonTbody');
+    const dstHead = document.getElementById('modalJsonThead');
+    const dstBody = document.getElementById('modalJsonTbody');
+    const srcTitle = document.getElementById('pageTitle');
+    const srcPage = document.getElementById('pageNumB');
+    const dstTitle = document.getElementById('modalPageTitle');
+    const dstPage = document.getElementById('modalPageNum');
+
+    if (!btnOpen || !overlay || !btnClose || !srcHead || !srcBody || !dstHead || !dstBody) return;
+
+    function openModal() {
+      // Copy current table HTML (avoid duplicating element IDs by using separate modal thead/tbody)
+      dstHead.innerHTML = srcHead.innerHTML;
+      dstBody.innerHTML = srcBody.innerHTML;
+
+      if (dstTitle && srcTitle) dstTitle.textContent = srcTitle.textContent || '-';
+      if (dstPage && srcPage) dstPage.textContent = srcPage.textContent || '-';
+
+      overlay.classList.add('is-open');
+      overlay.setAttribute('aria-hidden', 'false');
+
+      // Prevent background scroll
+      document.body.dataset._prevOverflow = document.body.style.overflow || '';
+      document.body.style.overflow = 'hidden';
+    }
+
+    function closeModal() {
+      overlay.classList.remove('is-open');
+      overlay.setAttribute('aria-hidden', 'true');
+      dstHead.innerHTML = '';
+      dstBody.innerHTML = '';
+
+      // Restore background scroll
+      document.body.style.overflow = document.body.dataset._prevOverflow || '';
+      delete document.body.dataset._prevOverflow;
+    }
+
+    btnOpen.addEventListener('click', openModal);
+    btnClose.addEventListener('click', closeModal);
+
+    // Click on backdrop closes (but not inside modal shell)
+    overlay.addEventListener('click', (e) => {
+      if (e.target === overlay) closeModal();
+    });
+
+    // ESC closes
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape' && overlay.classList.contains('is-open')) closeModal();
+    });
+  })();
+
 </script>
 
 {% endblock %}

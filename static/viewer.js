@@ -1,4 +1,28 @@
 
+function formatConfidence(conf) {
+  if (conf === null || conf === undefined) return "";
+
+  // Preserve already-formatted percentages
+  if (typeof conf === "string") {
+    const s = conf.trim();
+    if (!s) return "";
+    if (s.endsWith("%")) return s;
+    const n = parseFloat(s.replace(",", "."));
+    if (!Number.isFinite(n)) return s;
+    conf = n;
+  }
+
+  if (typeof conf !== "number" || !Number.isFinite(conf)) return String(conf);
+
+  // Most of the pipeline uses 0..1. Display as percentage.
+  if (conf <= 1) return Math.round(conf * 100) + "%";
+
+  // If something already produced 0..100, treat as percent for display.
+  if (conf <= 100) return Math.round(conf) + "%";
+
+  return String(conf);
+}
+
 function renderTable(extracted) {
   const rows = extracted.rows || {};
   const head = document.getElementById("json-head");
@@ -33,7 +57,7 @@ function renderTable(extracted) {
     });
 
     tr.innerHTML += `<td contenteditable="false">${data.nota ?? ""}</td>`;
-    tr.innerHTML += `<td contenteditable="false">${data.confidence_score ?? 0}</td>`;
+    tr.innerHTML += `<td contenteditable="false">${formatConfidence(data.confidence_score ?? 0)}</td>`;
     tr.innerHTML += `<td><button class="edit-btn">Edit</button></td>`;
 
     body.appendChild(tr);

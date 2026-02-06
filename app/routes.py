@@ -190,6 +190,7 @@ def job_download_csv(job_id: int):
 
     # --- Consolidate extracted values across pages ---
     values_by_label: dict[str, dict[str, object]] = {}
+    values_by_term: dict[str, dict[str, object]] = {}
     years_seen: set[str] = set()
     years_list: list[str] = []
 
@@ -238,6 +239,13 @@ def job_download_csv(job_id: int):
             if not label:
                 continue
 
+            # taxonomy_term maps directly to the taxonomy template headers (when present)
+            term = item_obj.get("taxonomy_term") or item_obj.get("taxonomyTerm") or ""
+            term = str(term).strip() if term is not None else ""
+            term_bucket = None
+            if term:
+                term_bucket = values_by_term.setdefault(term, {})
+
             bucket = values_by_label.setdefault(label, {})
             for k, v in item_obj.items():
                 if not _is_year_key(k):
@@ -248,6 +256,13 @@ def job_download_csv(job_id: int):
                     bucket[k] = v
                 elif k not in bucket:
                     bucket[k] = v
+
+                # Also populate by taxonomy_term (direct header mapping), if available
+                if term_bucket is not None:
+                    if (term_bucket.get(k) in ("", None)) and (v not in ("", None)):
+                        term_bucket[k] = v
+                    elif k not in term_bucket:
+                        term_bucket[k] = v
 
     if not values_by_label:
         return jsonify({"error": "No extracted_json found for this job."}), 400
@@ -337,7 +352,43 @@ def job_download_csv(job_id: int):
 
     header_norms = list(header_norm_map.keys())
 
+    # --- 1) Direct mapping by taxonomy_term (preferred) ---
+    for term, year_map in values_by_term.items():
+        if not isinstance(year_map, dict):
+            continue
+
+        # choose value from primary year, otherwise take any year (most recent first)
+        val = ""
+        if primary_year and primary_year in year_map:
+            val = year_map.get(primary_year, "")
+        else:
+            for y in years_all:
+                if y in year_map:
+                    val = year_map.get(y, "")
+                    break
+            if val in ("", None) and year_map:
+                val = next(iter(year_map.values()))
+
+        if val in ("", None):
+            continue
+
+        matched_field = None
+        term_str = str(term).strip()
+        if term_str in row_out:
+            matched_field = term_str
+        else:
+            # normalized direct match
+            matched_field = header_norm_map.get(_norm(term_str))
+
+        if matched_field and matched_field in row_out:
+            if isinstance(val, (dict, list)):
+                val = json.dumps(val, ensure_ascii=False)
+            if row_out.get(matched_field) in ("", None):
+                row_out[matched_field] = str(val)
+
+    # --- 2) Fallback mapping by Experian Value (existing behavior) ---
     for extracted_label, year_map in values_by_label.items():
+
         if not isinstance(year_map, dict):
             continue
 
@@ -388,7 +439,8 @@ def job_download_csv(job_id: int):
             # stringify complex values
             if isinstance(val, (dict, list)):
                 val = json.dumps(val, ensure_ascii=False)
-            row_out[matched_field] = str(val)
+            if row_out.get(matched_field) in ("", None):
+                row_out[matched_field] = str(val)
 
     # --- Write CSV in the exact template format (semicolon, UTF-8 BOM for Excel) ---
     out_io = io.StringIO()
